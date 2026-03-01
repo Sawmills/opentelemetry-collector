@@ -233,11 +233,11 @@ func TestWithQueueBatchPayloadCodec(t *testing.T) {
 
 	be, err := NewBaseExporter(
 		exportertest.NewNopSettings(exportertest.NopType),
-		pipeline.SignalLogs,
-		noopExport,
-		WithQueueBatchPayloadCodec(codec),
-		WithQueueBatch(qCfg, newFakeQueueBatch()),
-	)
+			pipeline.SignalLogs,
+			noopExport,
+			WithQueueBatchPayloadCodec(codec),
+			WithQueueBatch(configoptional.Some(qCfg), newFakeQueueBatch()),
+		)
 	require.NoError(t, err)
 
 	encoded, err := be.queueBatchSettings.Encoding.Marshal(context.Background(), &requesttest.FakeRequest{})
