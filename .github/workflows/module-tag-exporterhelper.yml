@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MODULE_PREFIX: exporter/exporterhelper
+      # Bootstrap fallback if no module tags exist yet.
+      DEFAULT_BASE_VERSION: "0.140.1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,8 +52,7 @@ jobs:
             done
           fi
           if [[ -z "${BASE_VERSION}" ]]; then
-            echo "Unable to derive base_version from module tags; pass workflow_dispatch input base_version."
-            exit 1
+            BASE_VERSION="${DEFAULT_BASE_VERSION}"
           fi
           if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid base_version '${BASE_VERSION}'. Expected format: X.Y.Z"
