@@ -26,7 +26,7 @@ jobs:
       - name: Prepare Contrib Tests
         run: |
           contrib_path=/tmp/opentelemetry-collector-contrib
-          git clone --depth=1 https://github.com/open-telemetry/opentelemetry-collector-contrib.git $contrib_path
+          git clone --depth=1 https://github.com/Sawmills/opentelemetry-collector-contrib.git $contrib_path
           make CONTRIB_PATH=$contrib_path prepare-contrib
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
