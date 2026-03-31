@@ -2,7 +2,7 @@ receivers:
   otlp:
     protocols:
       http:
-        endpoint: localhost:${env:OTEL_PORT}
+        endpoint: 127.0.0.1:${env:OTEL_PORT}
 
 processors:
   batch:

@@ -391,7 +391,7 @@ func TestLogger_OTLP(t *testing.T) {
 }
 
 func newOTLPLogger(t *testing.T, level zapcore.Level, handler func(plogotlp.ExportRequest)) *zap.Logger {
-	srv, certFile := newTLSBackend(t, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	srv, certFile := newTLSBackend(t, http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)
 		assert.NoError(t, err)
 		defer request.Body.Close()
