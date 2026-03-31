@@ -11,14 +11,8 @@ jobs:
   benchmarks:
     name: Run benchmarks
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        group:
-          - receiver
-          - processor
-          - exporter
-          - pkg
+    env:
+      HAS_CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN != '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: ./.github/workflows/scripts/free-disk-space.sh
@@ -26,27 +20,24 @@ jobs:
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version: stable
-          cache: true
-          
-      - name: Calculate Modules
-        id: calc
-        run: |
-          if [ "${{ matrix.group }}" == "root" ]; then
-            echo "TARGET_MODULES=$(pwd)" >> $GITHUB_ENV
-          else
-            MODULES=$(find ./${{ matrix.group }} -mindepth 1 -maxdepth 2 -type f -name "go.mod" -exec dirname {} \; 2>/dev/null | sort | xargs echo -n || true)
-            if [ -z "$MODULES" ]; then
-              echo "SKIP_BENCH=true" >> $GITHUB_ENV
-              echo "No Go modules found in ${{ matrix.group }}, skipping this job."
-            else
-              echo "TARGET_MODULES=$MODULES" >> $GITHUB_ENV
-            fi
-          fi
-
-      - name: Run the benchmarks
-        if: env.SKIP_BENCH != 'true'
-        uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
+          cache: false
+      - name: Cache Go
+        id: go-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/go/bin
+            ~/go/pkg/mod
+          key: go-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/go.sum') }}
+      - name: Run the benchmarks (CodSpeed)
+        if: ${{ env.HAS_CODSPEED_TOKEN == 'true' }}
+        env:
+          CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN }}
+        uses: CodSpeedHQ/action@346a2d8a8d9d38909abd0bc3d23f773110f076ad # v4.4.1
         with:
           mode: walltime
-          run: make for-all-target TARGET="timebenchmark" GOMODULES="${{ env.TARGET_MODULES }}"
-          cache-instruments: true
+          run: make for-all-target TARGET="timebenchmark"
+          cache-instruments: false
+      - name: Run the benchmarks (fallback)
+        if: ${{ env.HAS_CODSPEED_TOKEN != 'true' }}
+        run: make for-all-target TARGET="timebenchmark"
