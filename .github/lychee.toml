@@ -4,5 +4,6 @@ accept = ["200..=299", "429"]
 
 exclude  = [
     "^http(s)?://localhost",
-    "^http(s)?://example.com"
+    "^http(s)?://example.com",
+    "^https://opentelemetry.io/img/logos/opentelemetry-logo-nav\\.png$"
 ]
