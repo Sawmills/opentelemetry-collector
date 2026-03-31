@@ -13,7 +13,7 @@ require (
 	go.opentelemetry.io/collector/confmap v1.54.0
 	go.opentelemetry.io/collector/confmap/provider/fileprovider v1.46.0
 	go.opentelemetry.io/collector/connector v0.148.0
-	go.opentelemetry.io/collector/connector/connectortest v0.140.0
+	go.opentelemetry.io/collector/connector/connectortest v0.148.0
 	go.opentelemetry.io/collector/connector/xconnector v0.148.0
 	go.opentelemetry.io/collector/consumer v1.54.0
 	go.opentelemetry.io/collector/consumer/consumertest v0.148.0
@@ -26,10 +26,10 @@ require (
 	go.opentelemetry.io/collector/pipeline v1.54.0
 	go.opentelemetry.io/collector/pipeline/xpipeline v0.148.0
 	go.opentelemetry.io/collector/processor v1.54.0
-	go.opentelemetry.io/collector/processor/processortest v0.140.0
+	go.opentelemetry.io/collector/processor/processortest v0.148.0
 	go.opentelemetry.io/collector/processor/xprocessor v0.148.0
 	go.opentelemetry.io/collector/receiver v1.54.0
-	go.opentelemetry.io/collector/receiver/receivertest v0.140.0
+	go.opentelemetry.io/collector/receiver/receivertest v0.148.0
 	go.opentelemetry.io/collector/receiver/xreceiver v0.148.0
 	go.opentelemetry.io/collector/scraper v0.148.0
 	go.opentelemetry.io/collector/scraper/scraperhelper v0.0.0-00010101000000-000000000000
@@ -101,7 +101,7 @@ require (
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
 	google.golang.org/grpc v1.79.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

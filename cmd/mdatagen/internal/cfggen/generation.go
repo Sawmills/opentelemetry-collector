@@ -262,7 +262,10 @@ func collectDefs(md *ConfigMetadata, defs map[string]*ConfigMetadata) {
 				defs[propName] = prop
 				collectDefs(prop, defs)
 			}
-			ap := md.AdditionalProperties
+			ap := prop.AdditionalProperties
+			if ap == nil {
+				ap = md.AdditionalProperties
+			}
 			if ap != nil && ap.Type == "object" && len(ap.Properties) > 0 {
 				defs[propName] = ap
 				collectDefs(ap, defs)
