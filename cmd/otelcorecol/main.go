@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"go.opentelemetry.io/collector/component"
@@ -48,8 +49,7 @@ func main() {
 	}
 
 	if err := run(set); err != nil {
-		// The error message is logged by cobra, so we intentionally
-		// avoid logging it again here to prevent duplicate output.
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
