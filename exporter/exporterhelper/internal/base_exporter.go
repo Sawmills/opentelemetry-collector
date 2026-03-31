@@ -49,7 +49,7 @@ type BaseExporter struct {
 	retryCfg   configretry.BackOffConfig
 
 	queueBatchSettings          queuebatch.Settings[request.Request]
-	queueCfg                    queuebatch.Config
+	queueCfg                    configoptional.Optional[queuebatch.Config]
 	queuePayloadCodec           queuePayloadCodec
 	queueUseEncodingForInMemory bool
 }
