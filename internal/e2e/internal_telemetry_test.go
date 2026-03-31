@@ -6,6 +6,7 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -67,9 +68,11 @@ service:
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// Set up HTTP server to capture traces from collector's internal telemetry
+			// Set up a TLS server to capture traces from collector's internal telemetry.
+			// otelconf always attaches a TLS client config for OTLP/HTTP exporters, so
+			// the test server cert needs to be trusted instead of using insecure HTTP.
 			traceSink := new(consumertest.TracesSink)
-			traceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			traceServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
@@ -83,6 +86,11 @@ service:
 				_ = traceSink.ConsumeTraces(r.Context(), otlpReq.Traces())
 			}))
 			defer traceServer.Close()
+			traceCertFile := filepath.Join(t.TempDir(), "trace-server-cert.pem")
+			require.NoError(t, os.WriteFile(traceCertFile, pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: traceServer.Certificate().Raw,
+			}), 0o600))
 
 			logSink := registerTestLogSink(t)
 
@@ -124,12 +132,13 @@ service:
             exporter:
               otlp:
                 protocol: http/protobuf
+                certificate: %s
                 endpoint: %s
   pipelines:
     traces:
       receivers: [otlp]
       exporters: [nop]
-`, otlphttpPort, logSink.url, metricsPort, traceServer.URL)[1:]), 0o600))
+`, otlphttpPort, logSink.url, metricsPort, traceCertFile, traceServer.URL)[1:]), 0o600))
 
 			// Create collector
 			configURIs := []string{configFile}

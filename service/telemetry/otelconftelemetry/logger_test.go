@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -392,16 +391,26 @@ func TestLogger_OTLP(t *testing.T) {
 }
 
 func newOTLPLogger(t *testing.T, level zapcore.Level, handler func(plogotlp.ExportRequest)) *zap.Logger {
-	srv := createLogsBackend(t, "/v1/logs", handler)
-	t.Cleanup(srv.Close)
+	srv, certFile := newTLSBackend(t, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		assert.NoError(t, err)
+		defer request.Body.Close()
+
+		// Unmarshal the protobuf body into logs
+		req := plogotlp.NewExportRequest()
+		err = req.UnmarshalProto(body)
+		assert.NoError(t, err)
+
+		handler(req)
+	}))
 
 	processors := []config.LogRecordProcessor{{
 		Simple: &config.SimpleLogRecordProcessor{
 			Exporter: config.LogRecordExporter{
 				OTLP: &config.OTLP{
-					Endpoint: ptr(srv.URL),
-					Protocol: ptr("http/protobuf"),
-					Insecure: ptr(true),
+					Endpoint:    ptr(srv.URL),
+					Protocol:    ptr("http/protobuf"),
+					Certificate: ptr(certFile),
 				},
 			},
 		},
@@ -436,31 +445,21 @@ func newOTLPLogger(t *testing.T, level zapcore.Level, handler func(plogotlp.Expo
 	return logger
 }
 
-func createLogsBackend(t *testing.T, endpoint string, handler func(plogotlp.ExportRequest)) *httptest.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc(endpoint, func(_ http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		assert.NoError(t, err)
-		defer request.Body.Close()
-
-		// Unmarshal the protobuf body into logs
-		req := plogotlp.NewExportRequest()
-		err = req.UnmarshalProto(body)
-		assert.NoError(t, err)
-
-		handler(req)
-	})
-	return httptest.NewServer(mux)
-}
-
 func TestLogAttributeInjection(t *testing.T) {
 	core, consoleLogs := observer.New(zapcore.DebugLevel)
 
 	var otlpLogs []plogotlp.ExportRequest
-	srv := createLogsBackend(t, "/v1/logs", func(req plogotlp.ExportRequest) {
+	srv, certFile := newTLSBackend(t, http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		assert.NoError(t, err)
+		defer request.Body.Close()
+
+		req := plogotlp.NewExportRequest()
+		err = req.UnmarshalProto(body)
+		assert.NoError(t, err)
+
 		otlpLogs = append(otlpLogs, req)
-	})
-	t.Cleanup(srv.Close)
+	}))
 
 	cfg := &Config{
 		Resource: map[string]*string{
@@ -475,9 +474,9 @@ func TestLogAttributeInjection(t *testing.T) {
 					Exporter: config.LogRecordExporter{
 						OTLP: &config.OTLP{
 							// Send OTLP logs to the mock backend
-							Endpoint: ptr(srv.URL),
-							Protocol: ptr("http/protobuf"),
-							Insecure: ptr(true),
+							Endpoint:    ptr(srv.URL),
+							Protocol:    ptr("http/protobuf"),
+							Certificate: ptr(certFile),
 						},
 					},
 				},

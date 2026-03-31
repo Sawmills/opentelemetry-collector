@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -356,7 +355,7 @@ func TestTelemetryMetrics_DefaultViews(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var metrics pmetric.Metrics
-			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+			srv, certFile := newTLSBackend(t, http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
 				body, err := io.ReadAll(req.Body)
 				assert.NoError(t, err)
 
@@ -364,7 +363,6 @@ func TestTelemetryMetrics_DefaultViews(t *testing.T) {
 				assert.NoError(t, exportRequest.UnmarshalProto(body))
 				metrics = exportRequest.Metrics()
 			}))
-			defer srv.Close()
 
 			cfg := createDefaultConfig().(*Config)
 			cfg.Metrics.Level = configtelemetry.LevelDetailed
@@ -373,9 +371,9 @@ func TestTelemetryMetrics_DefaultViews(t *testing.T) {
 				Periodic: &config.PeriodicMetricReader{
 					Exporter: config.PushMetricExporter{
 						OTLP: &config.OTLPMetric{
-							Endpoint: ptr(srv.URL),
-							Protocol: ptr("http/protobuf"),
-							Insecure: ptr(true),
+							Endpoint:    ptr(srv.URL),
+							Protocol:    ptr("http/protobuf"),
+							Certificate: ptr(certFile),
 						},
 					},
 				},
