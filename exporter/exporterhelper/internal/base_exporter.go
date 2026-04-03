@@ -224,6 +224,12 @@ func WithQueueBatch(cfg configoptional.Optional[queuebatch.Config], set queuebat
 			o.ExportFailureMessage += " Try enabling sending_queue to survive temporary failures."
 			return nil
 		}
+		if o.queuePayloadCodec != nil && set.Encoding != nil {
+			set.Encoding = payloadCodecEncoding{
+				encoding: set.Encoding,
+				codec:    o.queuePayloadCodec,
+			}
+		}
 		if cfg.Get().StorageID != nil && set.Encoding == nil {
 			return errors.New("`Settings.Encoding` must not be nil when persistent queue is enabled")
 		}

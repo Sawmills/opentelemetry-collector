@@ -121,11 +121,12 @@ func TestMetricStability(t *testing.T) {
 			configFile: "metric_stability_test_readers.yaml",
 			expectedMetrics: map[string]bool{
 				// Process metrics
-				"otelcol_process_uptime_seconds_total":           false,
-				"otelcol_process_cpu_seconds_total":              false,
-				"otelcol_process_memory_rss_bytes":               false,
-				"otelcol_process_runtime_heap_alloc_bytes":       false,
-				"otelcol_process_runtime_total_sys_memory_bytes": false,
+				"otelcol_process_uptime_seconds_total":            false,
+				"otelcol_process_cpu_seconds_total":               false,
+				"otelcol_process_memory_rss_bytes":                false,
+				"otelcol_process_runtime_heap_alloc_bytes":        false,
+				"otelcol_process_runtime_total_alloc_bytes_total": false,
+				"otelcol_process_runtime_total_sys_memory_bytes":  false,
 
 				// Batch processor metrics
 				"otelcol_processor_batch_batch_send_size":            false,
@@ -255,7 +256,7 @@ func sendTestMetrics(otelPort string) error {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/v1/metrics", otelPort), bytes.NewReader(metricsBytes))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%s/v1/metrics", otelPort), bytes.NewReader(metricsBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create metrics request: %w", err)
 	}
@@ -290,7 +291,7 @@ func sendTestTraces(otelPort string) error {
 		return fmt.Errorf("failed to marshal traces: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/v1/traces", otelPort), bytes.NewReader(tracesBytes))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%s/v1/traces", otelPort), bytes.NewReader(tracesBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create traces request: %w", err)
 	}
@@ -323,7 +324,7 @@ func sendTestLogs(otelPort string) error {
 		return fmt.Errorf("failed to marshal logs: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%s/v1/logs", otelPort), bytes.NewReader(logsBytes))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%s/v1/logs", otelPort), bytes.NewReader(logsBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create logs request: %w", err)
 	}
@@ -355,7 +356,7 @@ func waitMetricsReady(t *testing.T, metricsPort string) {
 }
 
 func readMetrics(t require.TestingT, metricsPort string) map[string]*dto.MetricFamily {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/metrics", metricsPort))
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/metrics", metricsPort))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)

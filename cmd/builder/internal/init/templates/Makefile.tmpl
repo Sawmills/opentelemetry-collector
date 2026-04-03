@@ -1,15 +1,14 @@
+GOMODULES := $(shell find . -mindepth 2 \
+							 -type f \
+							 -name "go.mod" \
+							 -not -path "./internal/tools/*" \
+							 -exec dirname {} \; | sort )
+
+
 .PHONY: generate
 generate:
 	go tool go.opentelemetry.io/collector/cmd/builder --verbose --config manifest.yaml
 	cd build/collector && go mod tidy
-
-.PHONY: tidy
-tidy:
-	@if [ -d build/collector ]; then \
-		cd build/collector && go mod tidy; \
-	else \
-		go mod tidy; \
-	fi
 
 .PHONY: run
 run: generate

@@ -37,11 +37,12 @@ func TestCreateTracerProvider(t *testing.T) {
 		assert.NoError(t, exportRequest.UnmarshalProto(body))
 		received = append(received, exportRequest.Traces())
 	})
-	srv, certFile := newTLSBackend(t, mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
 
 	cfg := createDefaultConfig().(*Config)
 	cfg.Traces.Propagators = []string{"b3", "tracecontext"}
-	cfg.Traces.Processors = []config.SpanProcessor{newOTLPSimpleSpanProcessor(srv, certFile)}
+	cfg.Traces.Processors = []config.SpanProcessor{newOTLPSimpleSpanProcessor(srv)}
 
 	resource, err := createResource(t.Context(), telemetry.Settings{
 		BuildInfo: component.BuildInfo{Command: "otelcol", Version: "latest"},
@@ -92,11 +93,12 @@ func TestCreateTracerProvider_Invalid(t *testing.T) {
 func TestCreateTracerProvider_Propagators(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/traces", func(http.ResponseWriter, *http.Request) {})
-	srv, certFile := newTLSBackend(t, mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
 
 	cfg := createDefaultConfig().(*Config)
 	cfg.Traces.Propagators = []string{"b3", "tracecontext"}
-	cfg.Traces.Processors = []config.SpanProcessor{newOTLPSimpleSpanProcessor(srv, certFile)}
+	cfg.Traces.Processors = []config.SpanProcessor{newOTLPSimpleSpanProcessor(srv)}
 
 	resource, err := createResource(t.Context(), telemetry.Settings{
 		BuildInfo: component.BuildInfo{Command: "otelcol", Version: "latest"},
@@ -146,11 +148,12 @@ func TestCreateTracerProvider_Disabled(t *testing.T) {
 	mux.HandleFunc("/v1/traces", func(http.ResponseWriter, *http.Request) {
 		received++
 	})
-	srv, certFile := newTLSBackend(t, mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
 
 	cfg := createDefaultConfig().(*Config)
 	cfg.Traces.Level = configtelemetry.LevelNone
-	cfg.Traces.Processors = []config.SpanProcessor{newOTLPSimpleSpanProcessor(srv, certFile)}
+	cfg.Traces.Processors = []config.SpanProcessor{newOTLPSimpleSpanProcessor(srv)}
 
 	core, observedLogs := observer.New(zapcore.DebugLevel)
 
@@ -182,14 +185,14 @@ func TestCreateTracerProvider_Disabled(t *testing.T) {
 	assert.Equal(t, 0, received)
 }
 
-func newOTLPSimpleSpanProcessor(srv *httptest.Server, certFile string) config.SpanProcessor {
+func newOTLPSimpleSpanProcessor(srv *httptest.Server) config.SpanProcessor {
 	return config.SpanProcessor{
 		Simple: &config.SimpleSpanProcessor{
 			Exporter: config.SpanExporter{
 				OTLP: &config.OTLP{
-					Endpoint:    ptr(srv.URL),
-					Protocol:    ptr("http/protobuf"),
-					Certificate: ptr(certFile),
+					Endpoint: ptr(srv.URL),
+					Protocol: ptr("http/protobuf"),
+					Insecure: ptr(true),
 				},
 			},
 		},

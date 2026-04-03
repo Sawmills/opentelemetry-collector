@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -54,29 +55,19 @@ func TestCreateMeterProvider(t *testing.T) {
 			name: "UseOpenTelemetryForInternalMetrics",
 			expectedMetrics: map[string]metricValue{
 				metricPrefix + otelPrefix + counterName: {
-					value: 13,
-					labels: map[string]string{
-						"service_name":        "otelcol",
-						"service_version":     "latest",
-						"service_instance_id": testInstanceID,
-					},
+					value:  13,
+					labels: map[string]string{},
 				},
 				metricPrefix + grpcPrefix + counterName: {
 					value: 11,
 					labels: map[string]string{
-						"rpc_system":          "grpc",
-						"service_name":        "otelcol",
-						"service_version":     "latest",
-						"service_instance_id": testInstanceID,
+						"rpc_system": "grpc",
 					},
 				},
 				metricPrefix + httpPrefix + counterName: {
 					value: 10,
 					labels: map[string]string{
 						"http_request_method": "GET",
-						"service_name":        "otelcol",
-						"service_version":     "latest",
-						"service_instance_id": testInstanceID,
 					},
 				},
 				"target_info": {
@@ -355,7 +346,7 @@ func TestTelemetryMetrics_DefaultViews(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var metrics pmetric.Metrics
-			srv, certFile := newTLSBackend(t, http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
 				body, err := io.ReadAll(req.Body)
 				assert.NoError(t, err)
 
@@ -363,6 +354,7 @@ func TestTelemetryMetrics_DefaultViews(t *testing.T) {
 				assert.NoError(t, exportRequest.UnmarshalProto(body))
 				metrics = exportRequest.Metrics()
 			}))
+			defer srv.Close()
 
 			cfg := createDefaultConfig().(*Config)
 			cfg.Metrics.Level = configtelemetry.LevelDetailed
@@ -371,9 +363,9 @@ func TestTelemetryMetrics_DefaultViews(t *testing.T) {
 				Periodic: &config.PeriodicMetricReader{
 					Exporter: config.PushMetricExporter{
 						OTLP: &config.OTLPMetric{
-							Endpoint:    ptr(srv.URL),
-							Protocol:    ptr("http/protobuf"),
-							Certificate: ptr(certFile),
+							Endpoint: ptr(srv.URL),
+							Protocol: ptr("http/protobuf"),
+							Insecure: ptr(true),
 						},
 					},
 				},
