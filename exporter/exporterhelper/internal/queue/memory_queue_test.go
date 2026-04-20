@@ -114,6 +114,26 @@ func TestMemoryQueueBlockingOfferStampsEnqueueTimeAfterAdmission(t *testing.T) {
 	done.OnDone(nil)
 }
 
+func TestMemoryQueueOldestTimestampTracksInflightItem(t *testing.T) {
+	set := newSettings(request.SizerTypeItems, 1)
+	q := newMemoryQueue[intRequest](set).(*memoryQueue[intRequest])
+	require.NoError(t, q.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() {
+		require.NoError(t, q.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, q.Offer(context.Background(), 1))
+
+	_, req, enqueuedAt, done, ok := q.Read(context.Background())
+	require.True(t, ok)
+	require.EqualValues(t, 1, req)
+	require.False(t, enqueuedAt.IsZero())
+	require.Equal(t, enqueuedAt, q.OldestTimestamp(), "oldest timestamp should include the in-flight item until Done")
+
+	done.OnDone(nil)
+	require.True(t, q.OldestTimestamp().IsZero())
+}
+
 func TestMemoryQueueDrainWhenShutdown(t *testing.T) {
 	set := newSettings(request.SizerTypeItems, 7)
 	q := newMemoryQueue[intRequest](set)

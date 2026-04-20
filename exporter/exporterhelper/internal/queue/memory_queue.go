@@ -4,6 +4,7 @@
 package queue // import "go.opentelemetry.io/collector/exporter/exporterhelper/internal/queue"
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"sync"
@@ -41,6 +42,9 @@ type memoryQueue[T request.Request] struct {
 	hasMoreElements        *sync.Cond
 	hasMoreSpace           *cond
 	items                  *linkedQueue[memoryQueueItem[T]]
+	enqueueTimes           map[*blockingDone]time.Time
+	enqueueHeap            memoryOldestHeap
+	oldestEnqueued         time.Time
 	size                   int64
 	stopped                bool
 	waitForResult          bool
@@ -59,6 +63,7 @@ func newMemoryQueue[T request.Request](set Settings[T]) readableQueue[T] {
 		logger:                 set.Telemetry.Logger,
 		cap:                    set.Capacity,
 		items:                  &linkedQueue[memoryQueueItem[T]]{},
+		enqueueTimes:           make(map[*blockingDone]time.Time),
 		waitForResult:          set.WaitForResult,
 		blockOnOverflow:        set.BlockOnOverflow,
 		useEncodingForInMemory: set.UseEncodingForInMemory,
@@ -181,6 +186,9 @@ func (mq *memoryQueue[T]) add(ctx context.Context, el memoryQueueItem[T], elSize
 	el.enqueuedAt = time.Now()
 	done := blockingDonePool.Get().(*blockingDone)
 	done.reset(elSize, mq)
+	mq.enqueueTimes[done] = el.enqueuedAt
+	heap.Push(&mq.enqueueHeap, memoryOldestEntry{done: done, enqueuedAt: el.enqueuedAt})
+	mq.syncOldestEnqueuedLocked()
 	mq.items.push(el, done)
 	// Signal one consumer if any.
 	mq.hasMoreElements.Signal()
@@ -230,6 +238,7 @@ func (mq *memoryQueue[T]) onDone(bd *blockingDone, err error) {
 }
 
 func (mq *memoryQueue[T]) onDoneLocked(bd *blockingDone, err error) {
+	mq.removeEnqueueTimeLocked(bd)
 	mq.size -= bd.elSize
 	mq.hasMoreSpace.Signal()
 	if mq.waitForResult {
@@ -262,10 +271,7 @@ func (mq *memoryQueue[T]) Capacity() int64 {
 func (mq *memoryQueue[T]) OldestTimestamp() time.Time {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
-	if mq.items.head == nil {
-		return time.Time{}
-	}
-	return mq.items.head.data.enqueuedAt
+	return mq.oldestEnqueued
 }
 
 type memoryQueueItem[T request.Request] struct {
@@ -284,6 +290,35 @@ type node[T any] struct {
 type linkedQueue[T any] struct {
 	head *node[T]
 	tail *node[T]
+}
+
+type memoryOldestEntry struct {
+	done       *blockingDone
+	enqueuedAt time.Time
+}
+
+type memoryOldestHeap []memoryOldestEntry
+
+func (h memoryOldestHeap) Len() int { return len(h) }
+
+func (h memoryOldestHeap) Less(i, j int) bool {
+	return h[i].enqueuedAt.Before(h[j].enqueuedAt)
+}
+
+func (h memoryOldestHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *memoryOldestHeap) Push(x any) {
+	*h = append(*h, x.(memoryOldestEntry))
+}
+
+func (h *memoryOldestHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 func (l *linkedQueue[T]) push(data T, done Done) {
@@ -328,4 +363,37 @@ func (bd *blockingDone) reset(elSize int64, queue interface{ onDone(*blockingDon
 
 func (bd *blockingDone) OnDone(err error) {
 	bd.queue.onDone(bd, err)
+}
+
+func (mq *memoryQueue[T]) removeEnqueueTimeLocked(done *blockingDone) {
+	delete(mq.enqueueTimes, done)
+	if len(mq.enqueueHeap) > 2*len(mq.enqueueTimes)+1 {
+		mq.rebuildEnqueueHeapLocked()
+	}
+	mq.syncOldestEnqueuedLocked()
+}
+
+func (mq *memoryQueue[T]) rebuildEnqueueHeapLocked() {
+	mq.enqueueHeap = make(memoryOldestHeap, 0, len(mq.enqueueTimes))
+	for done, enqueuedAt := range mq.enqueueTimes {
+		if enqueuedAt.IsZero() {
+			continue
+		}
+		mq.enqueueHeap = append(mq.enqueueHeap, memoryOldestEntry{done: done, enqueuedAt: enqueuedAt})
+	}
+	heap.Init(&mq.enqueueHeap)
+}
+
+func (mq *memoryQueue[T]) syncOldestEnqueuedLocked() {
+	for len(mq.enqueueHeap) > 0 {
+		oldest := mq.enqueueHeap[0]
+		enqueuedAt, ok := mq.enqueueTimes[oldest.done]
+		if !ok || enqueuedAt.IsZero() || !enqueuedAt.Equal(oldest.enqueuedAt) {
+			heap.Pop(&mq.enqueueHeap)
+			continue
+		}
+		mq.oldestEnqueued = enqueuedAt
+		return
+	}
+	mq.oldestEnqueued = time.Time{}
 }
