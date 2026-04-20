@@ -34,6 +34,55 @@ func TestCondSignalDoesNotBlockWithPendingWakeup(t *testing.T) {
 	}
 }
 
+func TestCondSignalWakesOneWaiter(t *testing.T) {
+	var mu sync.Mutex
+	c := newCond(&mu)
+
+	errCh := make(chan error, 2)
+	for range 2 {
+		go func() {
+			mu.Lock()
+			defer mu.Unlock()
+			errCh <- c.Wait(context.Background())
+		}()
+	}
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(c.waiters) == 2
+	}, time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	c.Signal()
+	mu.Unlock()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Signal did not wake a waiter")
+	}
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+		t.Fatal("Signal woke more than one waiter")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mu.Lock()
+	c.Signal()
+	mu.Unlock()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("second waiter was not released")
+	}
+}
+
 func TestCondWaitReturnsOnContextCancel(t *testing.T) {
 	var mu sync.Mutex
 	c := newCond(&mu)
