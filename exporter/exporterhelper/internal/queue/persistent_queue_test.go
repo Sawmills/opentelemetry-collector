@@ -880,7 +880,7 @@ func TestItemIndexArrayMarshaling(t *testing.T) {
 
 func TestMarshalQueuedItemRoundTrip(t *testing.T) {
 	payload := []byte("payload")
-	enqueuedAt := time.Unix(0, 123456789)
+	enqueuedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Nanosecond)
 
 	marshaled := marshalQueuedItem(payload, enqueuedAt)
 	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(marshaled)
@@ -891,6 +891,15 @@ func TestMarshalQueuedItemRoundTrip(t *testing.T) {
 
 func TestUnmarshalQueuedItemDoesNotMisclassifyLegacyPayloadPrefix(t *testing.T) {
 	payload := append([]byte(queueItemLegacyMagic), []byte("legacy-payload")...)
+
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(payload)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.True(t, unmarshaledTime.IsZero())
+}
+
+func TestUnmarshalQueuedItemDoesNotMisclassifyNewPayloadPrefix(t *testing.T) {
+	payload := append([]byte(queueItemTimestampMagic), []byte("new-payload")...)
 
 	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(payload)
 

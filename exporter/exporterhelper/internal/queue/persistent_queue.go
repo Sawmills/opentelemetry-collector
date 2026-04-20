@@ -702,7 +702,7 @@ func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
 }
 
 func unmarshalQueuedItem(payload []byte) ([]byte, time.Time) {
-	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemTimestampMagic, queueItemHeaderSize, false); ok {
+	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemTimestampMagic, queueItemHeaderSize, true); ok {
 		return unpackedPayload, enqueuedAt
 	}
 	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemLegacyMagic, queueItemLegacyHeaderSize, true); ok {
