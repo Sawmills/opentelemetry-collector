@@ -56,6 +56,7 @@ telemetry:
       unit: ms
       histogram:
         value_type: int
+        bucket_boundaries: [100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000]
 
     exporter_queue_batch_send_size:
       enabled: true

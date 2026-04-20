@@ -160,6 +160,7 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		"otelcol_exporter_queue_batch_send_age",
 		metric.WithDescription("Age in ms of a queued batch when it is handed off for sending. [Development]"),
 		metric.WithUnit("ms"),
+		metric.WithExplicitBucketBoundaries([]float64{100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000}...),
 	)
 	errs = errors.Join(errs, err)
 	builder.ExporterQueueBatchSendSize, err = builder.meter.Int64Histogram(
