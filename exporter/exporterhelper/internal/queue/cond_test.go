@@ -83,6 +83,51 @@ func TestCondSignalWakesOneWaiter(t *testing.T) {
 	}
 }
 
+func TestCondCanceledSignaledWaiterResignalsNextWaiter(t *testing.T) {
+	var mu sync.Mutex
+	c := newCond(&mu)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstErrCh := make(chan error, 1)
+	secondErrCh := make(chan error, 1)
+
+	go func() {
+		mu.Lock()
+		defer mu.Unlock()
+		firstErrCh <- c.Wait(ctx)
+	}()
+	go func() {
+		mu.Lock()
+		defer mu.Unlock()
+		secondErrCh <- c.Wait(context.Background())
+	}()
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(c.waiters) == 2
+	}, time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	cancel()
+	c.Signal()
+	mu.Unlock()
+
+	select {
+	case err := <-firstErrCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("canceled waiter did not return")
+	}
+
+	select {
+	case err := <-secondErrCh:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("signal was not forwarded to the next waiter")
+	}
+}
+
 func TestCondWaitReturnsOnContextCancel(t *testing.T) {
 	var mu sync.Mutex
 	c := newCond(&mu)

@@ -53,12 +53,17 @@ func (c *cond) Wait(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		c.L.Lock()
+		removed := false
 		for i, w := range c.waiters {
 			if w == waiter {
 				copy(c.waiters[i:], c.waiters[i+1:])
 				c.waiters = c.waiters[:len(c.waiters)-1]
+				removed = true
 				break
 			}
+		}
+		if !removed {
+			c.Signal()
 		}
 		return ctx.Err()
 	case <-waiter.ch:
