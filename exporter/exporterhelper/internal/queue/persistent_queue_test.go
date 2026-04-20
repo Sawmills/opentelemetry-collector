@@ -873,6 +873,26 @@ func TestItemIndexArrayMarshaling(t *testing.T) {
 	}
 }
 
+func TestMarshalQueuedItemRoundTrip(t *testing.T) {
+	payload := []byte("payload")
+	enqueuedAt := time.Unix(0, 123456789)
+
+	marshaled := marshalQueuedItem(payload, enqueuedAt)
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(marshaled)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.Equal(t, enqueuedAt, unmarshaledTime)
+}
+
+func TestUnmarshalQueuedItemDoesNotMisclassifyLegacyPayloadPrefix(t *testing.T) {
+	payload := append([]byte(queueItemLegacyMagic), []byte("legacy-payload")...)
+
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(payload)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.True(t, unmarshaledTime.IsZero())
+}
+
 func TestPersistentQueue_ShutdownWhileConsuming(t *testing.T) {
 	ps := createTestPersistentQueueWithRequestsSizer(t, storagetest.NewMockStorageExtension(nil), 1000)
 

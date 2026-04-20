@@ -34,8 +34,9 @@ const (
 	// metadataKey is the new single key for all queue metadata.
 	metadataKey = "qmv0"
 
-	queueItemTimestampMagic = "qts1"
-	queueItemHeaderSize     = 12
+	queueItemLegacyMagic    = "qts1"
+	queueItemTimestampMagic = "otelqts1"
+	queueItemHeaderSize     = len(queueItemTimestampMagic) + 8
 )
 
 var (
@@ -637,18 +638,18 @@ func getItemKey(index uint64) string {
 
 func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
 	buf := make([]byte, queueItemHeaderSize+len(payload))
-	copy(buf[:4], []byte(queueItemTimestampMagic))
-	binary.LittleEndian.PutUint64(buf[4:queueItemHeaderSize], uint64(enqueuedAt.UnixNano()))
+	copy(buf[:len(queueItemTimestampMagic)], []byte(queueItemTimestampMagic))
+	binary.LittleEndian.PutUint64(buf[len(queueItemTimestampMagic):queueItemHeaderSize], uint64(enqueuedAt.UnixNano()))
 	copy(buf[queueItemHeaderSize:], payload)
 	return buf
 }
 
 func unmarshalQueuedItem(payload []byte) ([]byte, time.Time) {
-	if len(payload) < queueItemHeaderSize || string(payload[:4]) != queueItemTimestampMagic {
+	if len(payload) < queueItemHeaderSize || string(payload[:len(queueItemTimestampMagic)]) != queueItemTimestampMagic {
 		return payload, time.Time{}
 	}
 
-	unixNano := int64(binary.LittleEndian.Uint64(payload[4:queueItemHeaderSize]))
+	unixNano := int64(binary.LittleEndian.Uint64(payload[len(queueItemTimestampMagic):queueItemHeaderSize]))
 	if unixNano <= 0 {
 		return payload[queueItemHeaderSize:], time.Time{}
 	}

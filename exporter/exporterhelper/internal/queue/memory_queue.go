@@ -103,7 +103,6 @@ func (mq *memoryQueue[T]) Offer(ctx context.Context, el T) error {
 	done, err := mq.add(ctx, memoryQueueItem[T]{
 		ctx:        storedCtx,
 		request:    el,
-		enqueuedAt: time.Now(),
 	}, elSize)
 	if err != nil {
 		// Unref in case of an error since there will not be any async worker to pick it up.
@@ -141,8 +140,7 @@ func (mq *memoryQueue[T]) offerEncoded(ctx context.Context, el T, elSize int64) 
 	}
 
 	done, err := mq.add(ctx, memoryQueueItem[T]{
-		payload:    payload,
-		enqueuedAt: time.Now(),
+		payload: payload,
 	}, elSize)
 	if err != nil {
 		return err
@@ -176,6 +174,7 @@ func (mq *memoryQueue[T]) add(ctx context.Context, el memoryQueueItem[T], elSize
 	}
 
 	mq.size += elSize
+	el.enqueuedAt = time.Now()
 	done := blockingDonePool.Get().(*blockingDone)
 	done.reset(elSize, mq)
 	mq.items.push(el, done)

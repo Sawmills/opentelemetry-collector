@@ -73,6 +73,39 @@ func TestMemoryQueueBlockingCancelled(t *testing.T) {
 	require.NoError(t, q.Shutdown(context.Background()))
 }
 
+func TestMemoryQueueBlockingOfferStampsEnqueueTimeAfterAdmission(t *testing.T) {
+	set := newSettings(request.SizerTypeItems, 1)
+	set.BlockOnOverflow = true
+	q := newMemoryQueue[intRequest](set)
+	require.NoError(t, q.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() {
+		require.NoError(t, q.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, q.Offer(context.Background(), 1))
+
+	offerDone := make(chan error, 1)
+	go func() {
+		offerDone <- q.Offer(context.Background(), 1)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	releaseTime := time.Now()
+
+	_, req, _, done, ok := q.Read(context.Background())
+	require.True(t, ok)
+	require.EqualValues(t, 1, req)
+	done.OnDone(nil)
+
+	require.NoError(t, <-offerDone)
+
+	_, req, enqueuedAt, done, ok := q.Read(context.Background())
+	require.True(t, ok)
+	require.EqualValues(t, 1, req)
+	require.False(t, enqueuedAt.Before(releaseTime), "blocked offer should stamp enqueue time when the item is actually admitted")
+	done.OnDone(nil)
+}
+
 func TestMemoryQueueDrainWhenShutdown(t *testing.T) {
 	set := newSettings(request.SizerTypeItems, 7)
 	q := newMemoryQueue[intRequest](set)
