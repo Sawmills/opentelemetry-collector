@@ -178,7 +178,7 @@ func TestQueueRecordsBatchSendAge(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, histogram.DataPoints, 1)
 	require.Equal(t, uint64(1), histogram.DataPoints[0].Count)
-	require.Greater(t, histogram.DataPoints[0].Sum, int64(0))
+	require.Positive(t, histogram.DataPoints[0].Sum)
 	require.True(t, histogram.DataPoints[0].Attributes.HasValue(attribute.Key(exporterKey)))
 	require.True(t, histogram.DataPoints[0].Attributes.HasValue(attribute.Key(dataTypeKey)))
 }

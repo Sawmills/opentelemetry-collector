@@ -695,7 +695,7 @@ func getItemKey(index uint64) string {
 
 func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
 	buf := make([]byte, queueItemHeaderSize+len(payload))
-	copy(buf[:len(queueItemTimestampMagic)], []byte(queueItemTimestampMagic))
+	copy(buf[:len(queueItemTimestampMagic)], queueItemTimestampMagic)
 	binary.LittleEndian.PutUint64(buf[len(queueItemTimestampMagic):queueItemHeaderSize], uint64(enqueuedAt.UnixNano()))
 	copy(buf[queueItemHeaderSize:], payload)
 	return buf

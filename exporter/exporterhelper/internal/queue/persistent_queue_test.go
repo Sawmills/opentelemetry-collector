@@ -899,7 +899,7 @@ func TestUnmarshalQueuedItemHandlesLegacyHeader(t *testing.T) {
 	enqueuedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Nanosecond)
 	legacyHeaderSize := len(queueItemLegacyMagic) + 8
 	marshaled := make([]byte, legacyHeaderSize+len(payload))
-	copy(marshaled[:len(queueItemLegacyMagic)], []byte(queueItemLegacyMagic))
+	copy(marshaled[:len(queueItemLegacyMagic)], queueItemLegacyMagic)
 	binary.LittleEndian.PutUint64(marshaled[len(queueItemLegacyMagic):legacyHeaderSize], uint64(enqueuedAt.UnixNano()))
 	copy(marshaled[legacyHeaderSize:], payload)
 
@@ -959,7 +959,7 @@ func TestPersistentQueueSyncOldestEnqueuedLockedCompactsStaleHeapEntries(t *test
 	}
 
 	pq.syncOldestEnqueuedLocked()
-	require.Equal(t, 1, len(pq.enqueueTimes))
+	require.Len(t, pq.enqueueTimes, 1)
 	require.LessOrEqual(t, len(pq.enqueueHeap), 2, "heap should be compacted after most entries become stale")
 }
 

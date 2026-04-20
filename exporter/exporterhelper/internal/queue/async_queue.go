@@ -59,10 +59,7 @@ func (qc *asyncQueue[T]) Start(ctx context.Context, host component.Host) error {
 					return
 				}
 				if !enqueuedAt.IsZero() {
-					age := time.Since(enqueuedAt).Milliseconds()
-					if age < 0 {
-						age = 0
-					}
+					age := max(time.Since(enqueuedAt).Milliseconds(), int64(0))
 					qc.sendAge.Record(ctx, age, qc.metricAttr)
 				}
 				qc.consumeFunc(ctx, req, done)

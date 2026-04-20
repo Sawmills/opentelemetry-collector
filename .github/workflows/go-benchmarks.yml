@@ -11,6 +11,8 @@ jobs:
   benchmarks:
     name: Run benchmarks
     runs-on: ubuntu-latest
+    env:
+      CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -43,10 +45,15 @@ jobs:
             fi
           fi
 
-      - name: Run the benchmarks
-        if: env.SKIP_BENCH != 'true'
+      - name: Run the benchmarks with CodSpeed
+        if: env.SKIP_BENCH != 'true' && env.CODSPEED_TOKEN != ''
         uses: CodSpeedHQ/action@d872884a306dd4853acf0f584f4b706cf0cc72a2 # v4.13.0
         with:
           mode: walltime
+          token: ${{ env.CODSPEED_TOKEN }}
           run: make for-all-target TARGET="timebenchmark" GOMODULES="${{ env.TARGET_MODULES }}"
           cache-instruments: true
+
+      - name: Run the benchmarks without CodSpeed upload
+        if: env.SKIP_BENCH != 'true' && env.CODSPEED_TOKEN == ''
+        run: make for-all-target TARGET="timebenchmark" GOMODULES="${{ env.TARGET_MODULES }}"

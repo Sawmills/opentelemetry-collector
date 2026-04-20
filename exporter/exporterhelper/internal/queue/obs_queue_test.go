@@ -407,5 +407,5 @@ func TestObsQueueLogsOldestBatchAge(t *testing.T) {
 	gauge, ok := metric.Data.(metricdata.Gauge[int64])
 	require.True(t, ok)
 	require.Len(t, gauge.DataPoints, 1)
-	require.Greater(t, gauge.DataPoints[0].Value, int64(0))
+	require.Positive(t, gauge.DataPoints[0].Value)
 }
