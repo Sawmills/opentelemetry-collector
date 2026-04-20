@@ -13,50 +13,60 @@ import (
 // Also, it requires the caller to hold the c.L during all calls.
 type cond struct {
 	L       sync.Locker
-	ch      chan struct{}
-	waiting int64
+	waiters []*condWaiter
 }
 
 func newCond(l sync.Locker) *cond {
-	return &cond{L: l, ch: make(chan struct{}, 1)}
+	return &cond{L: l}
+}
+
+type condWaiter struct {
+	ch chan struct{}
 }
 
 // Signal wakes one goroutine waiting on c, if there is any.
 // It requires for the caller to hold c.L during the call.
 func (c *cond) Signal() {
-	if c.waiting == 0 {
+	if len(c.waiters) == 0 {
 		return
 	}
-	c.waiting--
-	c.ch <- struct{}{}
+
+	waiter := c.waiters[0]
+	c.waiters = c.waiters[1:]
+	close(waiter.ch)
 }
 
 // Broadcast wakes all goroutines waiting on c.
 // It requires for the caller to hold c.L during the call.
 func (c *cond) Broadcast() {
-	for ; c.waiting > 0; c.waiting-- {
-		c.ch <- struct{}{}
+	for _, waiter := range c.waiters {
+		close(waiter.ch)
 	}
+	c.waiters = nil
 }
 
 // Wait atomically unlocks c.L and suspends execution of the calling goroutine. After later resuming execution, Wait locks c.L before returning.
 func (c *cond) Wait(ctx context.Context) error {
-	c.waiting++
+	waiter := &condWaiter{ch: make(chan struct{})}
+	c.waiters = append(c.waiters, waiter)
 	c.L.Unlock()
 	select {
 	case <-ctx.Done():
 		c.L.Lock()
-		if c.waiting == 0 {
-			// If waiting is 0, it means that there was a signal sent and nobody else waits for it.
-			// Consume it, so that we don't unblock other consumer unnecessary,
-			// or we don't block the producer because the channel buffer is full.
-			<-c.ch
-		} else {
-			// Decrease the number of waiting routines.
-			c.waiting--
+		removed := false
+		for i, w := range c.waiters {
+			if w == waiter {
+				copy(c.waiters[i:], c.waiters[i+1:])
+				c.waiters = c.waiters[:len(c.waiters)-1]
+				removed = true
+				break
+			}
+		}
+		if !removed {
+			c.Signal()
 		}
 		return ctx.Err()
-	case <-c.ch:
+	case <-waiter.ch:
 		c.L.Lock()
 		return nil
 	}

@@ -5,6 +5,7 @@ package queue // import "go.opentelemetry.io/collector/exporter/exporterhelper/i
 
 import (
 	"context"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -28,7 +29,8 @@ const (
 type obsQueue[T request.Request] struct {
 	Queue[T]
 	tb                      *metadata.TelemetryBuilder
-	metricAttr              metric.MeasurementOption
+	enqueueFailedAttr       metric.MeasurementOption
+	sendMetricAttr          metric.MeasurementOption
 	enqueueFailedInst       metric.Int64Counter
 	queueBatchSizeInst      metric.Int64Histogram
 	queueBatchSizeBytesInst metric.Int64Histogram
@@ -59,13 +61,22 @@ func newObsQueue[T request.Request](set Settings[T], delegate Queue[T]) (Queue[T
 		return nil, err
 	}
 
+	err = tb.RegisterExporterQueueOldestBatchAgeCallback(func(_ context.Context, o metric.Int64Observer) error {
+		o.Observe(ageMillisSince(delegate.OldestTimestamp()), asyncAttr)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	tracer := metadata.Tracer(set.Telemetry)
 
 	or := &obsQueue[T]{
-		Queue:      delegate,
-		tb:         tb,
-		metricAttr: metric.WithAttributeSet(attribute.NewSet(exporterAttr)),
-		tracer:     tracer,
+		Queue:             delegate,
+		tb:                tb,
+		enqueueFailedAttr: metric.WithAttributeSet(attribute.NewSet(exporterAttr)),
+		sendMetricAttr:    asyncAttr,
+		tracer:            tracer,
 	}
 
 	switch set.Signal {
@@ -95,8 +106,8 @@ func (or *obsQueue[T]) Offer(ctx context.Context, req T) error {
 	// be modified by the downstream components like the batcher.
 	numItems := req.ItemsCount()
 
-	or.queueBatchSizeInst.Record(ctx, int64(numItems), or.metricAttr)
-	or.queueBatchSizeBytesInst.Record(ctx, int64(req.BytesSize()), or.metricAttr)
+	or.queueBatchSizeInst.Record(ctx, int64(numItems), or.sendMetricAttr)
+	or.queueBatchSizeBytesInst.Record(ctx, int64(req.BytesSize()), or.sendMetricAttr)
 
 	ctx, span := or.tracer.Start(ctx, "exporter/enqueue")
 	err := or.Queue.Offer(ctx, req)
@@ -104,7 +115,19 @@ func (or *obsQueue[T]) Offer(ctx context.Context, req T) error {
 
 	// No metrics recorded for profiles, remove enqueueFailedInst check with nil when profiles metrics available.
 	if err != nil && or.enqueueFailedInst != nil {
-		or.enqueueFailedInst.Add(ctx, int64(numItems), or.metricAttr)
+		or.enqueueFailedInst.Add(ctx, int64(numItems), or.enqueueFailedAttr)
 	}
 	return err
+}
+
+func ageMillisSince(ts time.Time) int64 {
+	if ts.IsZero() {
+		return 0
+	}
+
+	age := time.Since(ts).Milliseconds()
+	if age < 0 {
+		return 0
+	}
+	return age
 }

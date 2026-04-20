@@ -4,9 +4,11 @@
 package queue // import "go.opentelemetry.io/collector/exporter/exporterhelper/internal/queue"
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -40,11 +42,15 @@ type memoryQueue[T request.Request] struct {
 	hasMoreElements        *sync.Cond
 	hasMoreSpace           *cond
 	items                  *linkedQueue[memoryQueueItem[T]]
+	enqueueTimes           map[*blockingDone]time.Time
+	enqueueHeap            memoryOldestHeap
+	oldestEnqueued         time.Time
 	size                   int64
 	stopped                bool
 	waitForResult          bool
 	blockOnOverflow        bool
 	useEncodingForInMemory bool
+	onBlockForSpace        func()
 }
 
 // newMemoryQueue creates a sized elements channel. Each element is assigned a size by the provided sizer.
@@ -57,6 +63,7 @@ func newMemoryQueue[T request.Request](set Settings[T]) readableQueue[T] {
 		logger:                 set.Telemetry.Logger,
 		cap:                    set.Capacity,
 		items:                  &linkedQueue[memoryQueueItem[T]]{},
+		enqueueTimes:           make(map[*blockingDone]time.Time),
 		waitForResult:          set.WaitForResult,
 		blockOnOverflow:        set.BlockOnOverflow,
 		useEncodingForInMemory: set.UseEncodingForInMemory,
@@ -166,6 +173,9 @@ func (mq *memoryQueue[T]) add(ctx context.Context, el memoryQueueItem[T], elSize
 		if !mq.blockOnOverflow {
 			return nil, ErrQueueIsFull
 		}
+		if mq.onBlockForSpace != nil {
+			mq.onBlockForSpace()
+		}
 		// Wait for more space or before the ctx is Done.
 		if err := mq.hasMoreSpace.Wait(ctx); err != nil {
 			return nil, err
@@ -173,8 +183,12 @@ func (mq *memoryQueue[T]) add(ctx context.Context, el memoryQueueItem[T], elSize
 	}
 
 	mq.size += elSize
+	el.enqueuedAt = time.Now()
 	done := blockingDonePool.Get().(*blockingDone)
 	done.reset(elSize, mq)
+	mq.enqueueTimes[done] = el.enqueuedAt
+	heap.Push(&mq.enqueueHeap, memoryOldestEntry{done: done, enqueuedAt: el.enqueuedAt})
+	mq.syncOldestEnqueuedLocked()
 	mq.items.push(el, done)
 	// Signal one consumer if any.
 	mq.hasMoreElements.Signal()
@@ -184,7 +198,7 @@ func (mq *memoryQueue[T]) add(ctx context.Context, el memoryQueueItem[T], elSize
 // Read removes the element from the queue and returns it.
 // The call blocks until there is an item available or the queue is stopped.
 // The function returns true when an item is consumed or false if the queue is stopped and emptied.
-func (mq *memoryQueue[T]) Read(context.Context) (context.Context, T, Done, bool) {
+func (mq *memoryQueue[T]) Read(context.Context) (context.Context, T, time.Time, Done, bool) {
 	mq.mu.Lock()
 	defer mq.mu.Unlock()
 
@@ -192,7 +206,7 @@ func (mq *memoryQueue[T]) Read(context.Context) (context.Context, T, Done, bool)
 		if mq.items.hasElements() {
 			item, done := mq.items.pop()
 			if !mq.useEncodingForInMemory {
-				return item.ctx, item.request, done, true
+				return item.ctx, item.request, item.enqueuedAt, done, true
 			}
 
 			elCtx, el, err := mq.encoding.Unmarshal(item.payload)
@@ -203,12 +217,12 @@ func (mq *memoryQueue[T]) Read(context.Context) (context.Context, T, Done, bool)
 				}
 				continue
 			}
-			return elCtx, el, done, true
+			return elCtx, el, item.enqueuedAt, done, true
 		}
 
 		if mq.stopped {
 			var el T
-			return context.Background(), el, nil, false
+			return context.Background(), el, time.Time{}, nil, false
 		}
 
 		// TODO: Need to change the Queue interface to return an error to allow distinguish between shutdown and context canceled.
@@ -224,6 +238,7 @@ func (mq *memoryQueue[T]) onDone(bd *blockingDone, err error) {
 }
 
 func (mq *memoryQueue[T]) onDoneLocked(bd *blockingDone, err error) {
+	mq.removeEnqueueTimeLocked(bd)
 	mq.size -= bd.elSize
 	mq.hasMoreSpace.Signal()
 	if mq.waitForResult {
@@ -253,10 +268,17 @@ func (mq *memoryQueue[T]) Capacity() int64 {
 	return mq.cap
 }
 
+func (mq *memoryQueue[T]) OldestTimestamp() time.Time {
+	mq.mu.Lock()
+	defer mq.mu.Unlock()
+	return mq.oldestEnqueued
+}
+
 type memoryQueueItem[T request.Request] struct {
-	ctx     context.Context
-	request T
-	payload []byte
+	ctx        context.Context
+	request    T
+	payload    []byte
+	enqueuedAt time.Time
 }
 
 type node[T any] struct {
@@ -268,6 +290,35 @@ type node[T any] struct {
 type linkedQueue[T any] struct {
 	head *node[T]
 	tail *node[T]
+}
+
+type memoryOldestEntry struct {
+	done       *blockingDone
+	enqueuedAt time.Time
+}
+
+type memoryOldestHeap []memoryOldestEntry
+
+func (h memoryOldestHeap) Len() int { return len(h) }
+
+func (h memoryOldestHeap) Less(i, j int) bool {
+	return h[i].enqueuedAt.Before(h[j].enqueuedAt)
+}
+
+func (h memoryOldestHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *memoryOldestHeap) Push(x any) {
+	*h = append(*h, x.(memoryOldestEntry))
+}
+
+func (h *memoryOldestHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 func (l *linkedQueue[T]) push(data T, done Done) {
@@ -312,4 +363,37 @@ func (bd *blockingDone) reset(elSize int64, queue interface{ onDone(*blockingDon
 
 func (bd *blockingDone) OnDone(err error) {
 	bd.queue.onDone(bd, err)
+}
+
+func (mq *memoryQueue[T]) removeEnqueueTimeLocked(done *blockingDone) {
+	delete(mq.enqueueTimes, done)
+	if len(mq.enqueueHeap) > 2*len(mq.enqueueTimes)+1 {
+		mq.rebuildEnqueueHeapLocked()
+	}
+	mq.syncOldestEnqueuedLocked()
+}
+
+func (mq *memoryQueue[T]) rebuildEnqueueHeapLocked() {
+	mq.enqueueHeap = make(memoryOldestHeap, 0, len(mq.enqueueTimes))
+	for done, enqueuedAt := range mq.enqueueTimes {
+		if enqueuedAt.IsZero() {
+			continue
+		}
+		mq.enqueueHeap = append(mq.enqueueHeap, memoryOldestEntry{done: done, enqueuedAt: enqueuedAt})
+	}
+	heap.Init(&mq.enqueueHeap)
+}
+
+func (mq *memoryQueue[T]) syncOldestEnqueuedLocked() {
+	for len(mq.enqueueHeap) > 0 {
+		oldest := mq.enqueueHeap[0]
+		enqueuedAt, ok := mq.enqueueTimes[oldest.done]
+		if !ok || enqueuedAt.IsZero() || !enqueuedAt.Equal(oldest.enqueuedAt) {
+			heap.Pop(&mq.enqueueHeap)
+			continue
+		}
+		mq.oldestEnqueued = enqueuedAt
+		return
+	}
+	mq.oldestEnqueued = time.Time{}
 }
