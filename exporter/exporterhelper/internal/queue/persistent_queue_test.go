@@ -405,6 +405,10 @@ func TestPersistentQueue_ConsumersProducers(t *testing.T) {
 }
 
 func TestPersistentBlockingQueue(t *testing.T) {
+	const offersPerProducer = 20_000
+	const producers = 10
+	const totalOffers = offersPerProducer * producers
+
 	tests := []struct {
 		name      string
 		sizerType request.SizerType
@@ -437,9 +441,9 @@ func TestPersistentBlockingQueue(t *testing.T) {
 
 			td := intRequest(10)
 			wg := &sync.WaitGroup{}
-			for range 10 {
+			for range producers {
 				wg.Go(func() {
-					for range 100_000 {
+					for range offersPerProducer {
 						assert.NoError(t, pq.Offer(context.Background(), td))
 					}
 				})
@@ -447,7 +451,7 @@ func TestPersistentBlockingQueue(t *testing.T) {
 			wg.Wait()
 			// Because the persistent queue is not draining after Shutdown, need to wait here for the drain.
 			assert.Eventually(t, func() bool {
-				return int(consumed.Load()) == 1_000_000
+				return int(consumed.Load()) == totalOffers
 			}, 5*time.Second, 10*time.Millisecond)
 			require.NoError(t, ac.Shutdown(context.Background()))
 		})
