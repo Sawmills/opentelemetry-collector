@@ -35,10 +35,10 @@ const (
 	// metadataKey is the new single key for all queue metadata.
 	metadataKey = "qmv0"
 
-	queueItemLegacyMagic    = "qts1"
-	queueItemTimestampMagic = "otelqts1"
+	queueItemLegacyMagic      = "qts1"
+	queueItemTimestampMagic   = "otelqts1"
 	queueItemLegacyHeaderSize = len(queueItemLegacyMagic) + 8
-	queueItemHeaderSize     = len(queueItemTimestampMagic) + 8
+	queueItemHeaderSize       = len(queueItemTimestampMagic) + 8
 )
 
 var (

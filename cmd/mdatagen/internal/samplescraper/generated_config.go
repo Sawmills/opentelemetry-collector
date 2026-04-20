@@ -4,10 +4,11 @@ package samplescraper
 
 import (
 	"errors"
+	"time"
+
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configoptional"
 	"go.opentelemetry.io/collector/scraper/scraperhelper"
-	"time"
 )
 
 type TargetsItem struct {

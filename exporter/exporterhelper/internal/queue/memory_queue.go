@@ -102,8 +102,8 @@ func (mq *memoryQueue[T]) Offer(ctx context.Context, el T) error {
 	}
 
 	done, err := mq.add(ctx, memoryQueueItem[T]{
-		ctx:        storedCtx,
-		request:    el,
+		ctx:     storedCtx,
+		request: el,
 	}, elSize)
 	if err != nil {
 		// Unref in case of an error since there will not be any async worker to pick it up.
