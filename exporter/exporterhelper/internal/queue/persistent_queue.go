@@ -566,14 +566,14 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 		return fmt.Errorf("failed deleting item from queue, got error from storage: %w", err)
 	}
 
+	delete(pq.enqueueTimes, index)
+	pq.recomputeOldestEnqueuedLocked()
+
 	if err = pq.client.Batch(ctx, setOp); err != nil {
 		// even if this fails, we still have the right dispatched items in memory
 		// at worst, we'll have the wrong list in storage, and we'll discard the nonexistent items during startup
 		return fmt.Errorf("failed updating currently dispatched items, but deleted item successfully: %w", err)
 	}
-
-	delete(pq.enqueueTimes, index)
-	pq.recomputeOldestEnqueuedLocked()
 
 	return nil
 }
