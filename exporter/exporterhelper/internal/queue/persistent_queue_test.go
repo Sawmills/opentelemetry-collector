@@ -882,7 +882,7 @@ func TestMarshalQueuedItemRoundTrip(t *testing.T) {
 	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(marshaled)
 
 	require.Equal(t, payload, unmarshaledPayload)
-	require.Equal(t, enqueuedAt, unmarshaledTime)
+	require.Equal(t, enqueuedAt.UnixNano(), unmarshaledTime.UnixNano())
 }
 
 func TestUnmarshalQueuedItemDoesNotMisclassifyLegacyPayloadPrefix(t *testing.T) {
@@ -892,6 +892,21 @@ func TestUnmarshalQueuedItemDoesNotMisclassifyLegacyPayloadPrefix(t *testing.T) 
 
 	require.Equal(t, payload, unmarshaledPayload)
 	require.True(t, unmarshaledTime.IsZero())
+}
+
+func TestUnmarshalQueuedItemHandlesLegacyHeader(t *testing.T) {
+	payload := []byte("payload")
+	enqueuedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Nanosecond)
+	legacyHeaderSize := len(queueItemLegacyMagic) + 8
+	marshaled := make([]byte, legacyHeaderSize+len(payload))
+	copy(marshaled[:len(queueItemLegacyMagic)], []byte(queueItemLegacyMagic))
+	binary.LittleEndian.PutUint64(marshaled[len(queueItemLegacyMagic):legacyHeaderSize], uint64(enqueuedAt.UnixNano()))
+	copy(marshaled[legacyHeaderSize:], payload)
+
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(marshaled)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.Equal(t, enqueuedAt.UnixNano(), unmarshaledTime.UnixNano())
 }
 
 func TestPersistentQueueSyncOldestEnqueuedLockedSkipsDeletedEntries(t *testing.T) {
@@ -924,6 +939,28 @@ func TestPersistentQueueSyncOldestEnqueuedLockedSkipsDeletedEntries(t *testing.T
 	delete(pq.enqueueTimes, 2)
 	pq.syncOldestEnqueuedLocked()
 	require.True(t, pq.oldestEnqueued.IsZero())
+}
+
+func TestPersistentQueueSyncOldestEnqueuedLockedCompactsStaleHeapEntries(t *testing.T) {
+	pq := createTestPersistentQueueWithClient(newFakeBoundedStorageClient(4096))
+
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	base := time.Now().Add(-time.Hour)
+	for i := range 32 {
+		enqueuedAt := base.Add(time.Duration(i) * time.Second)
+		pq.enqueueTimes[uint64(i)] = enqueuedAt
+		heap.Push(&pq.enqueueHeap, queueOldestEntry{index: uint64(i), enqueuedAt: enqueuedAt})
+	}
+
+	for i := range 31 {
+		delete(pq.enqueueTimes, uint64(i))
+	}
+
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, 1, len(pq.enqueueTimes))
+	require.LessOrEqual(t, len(pq.enqueueHeap), 2, "heap should be compacted after most entries become stale")
 }
 
 func TestPersistentQueue_ShutdownWhileConsuming(t *testing.T) {

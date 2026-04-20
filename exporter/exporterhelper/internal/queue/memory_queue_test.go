@@ -76,7 +76,7 @@ func TestMemoryQueueBlockingCancelled(t *testing.T) {
 func TestMemoryQueueBlockingOfferStampsEnqueueTimeAfterAdmission(t *testing.T) {
 	set := newSettings(request.SizerTypeItems, 1)
 	set.BlockOnOverflow = true
-	q := newMemoryQueue[intRequest](set)
+	q := newMemoryQueue[intRequest](set).(*memoryQueue[intRequest])
 	require.NoError(t, q.Start(context.Background(), componenttest.NewNopHost()))
 	defer func() {
 		require.NoError(t, q.Shutdown(context.Background()))
@@ -85,11 +85,19 @@ func TestMemoryQueueBlockingOfferStampsEnqueueTimeAfterAdmission(t *testing.T) {
 	require.NoError(t, q.Offer(context.Background(), 1))
 
 	offerDone := make(chan error, 1)
+	blocked := make(chan struct{})
+	q.onBlockForSpace = func() {
+		select {
+		case <-blocked:
+		default:
+			close(blocked)
+		}
+	}
 	go func() {
 		offerDone <- q.Offer(context.Background(), 1)
 	}()
 
-	time.Sleep(25 * time.Millisecond)
+	<-blocked
 	releaseTime := time.Now()
 
 	_, req, _, done, ok := q.Read(context.Background())

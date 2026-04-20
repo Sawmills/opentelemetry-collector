@@ -46,6 +46,7 @@ type memoryQueue[T request.Request] struct {
 	waitForResult          bool
 	blockOnOverflow        bool
 	useEncodingForInMemory bool
+	onBlockForSpace        func()
 }
 
 // newMemoryQueue creates a sized elements channel. Each element is assigned a size by the provided sizer.
@@ -166,6 +167,9 @@ func (mq *memoryQueue[T]) add(ctx context.Context, el memoryQueueItem[T], elSize
 	for mq.size+elSize > mq.cap {
 		if !mq.blockOnOverflow {
 			return nil, ErrQueueIsFull
+		}
+		if mq.onBlockForSpace != nil {
+			mq.onBlockForSpace()
 		}
 		// Wait for more space or before the ctx is Done.
 		if err := mq.hasMoreSpace.Wait(ctx); err != nil {

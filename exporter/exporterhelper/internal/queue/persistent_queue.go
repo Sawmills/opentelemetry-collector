@@ -37,6 +37,7 @@ const (
 
 	queueItemLegacyMagic    = "qts1"
 	queueItemTimestampMagic = "otelqts1"
+	queueItemLegacyHeaderSize = len(queueItemLegacyMagic) + 8
 	queueItemHeaderSize     = len(queueItemTimestampMagic) + 8
 )
 
@@ -585,8 +586,7 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 	deleteOp := storage.DeleteOperation(getItemKey(index))
 	err = pq.client.Batch(ctx, setOp, deleteOp)
 	if err == nil {
-		delete(pq.enqueueTimes, index)
-		pq.syncOldestEnqueuedLocked()
+		pq.removeEnqueueTimeLocked(index)
 		// Everything ok, exit
 		return nil
 	}
@@ -600,8 +600,7 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 		return fmt.Errorf("failed deleting item from queue, got error from storage: %w", err)
 	}
 
-	delete(pq.enqueueTimes, index)
-	pq.syncOldestEnqueuedLocked()
+	pq.removeEnqueueTimeLocked(index)
 
 	if err = pq.client.Batch(ctx, setOp); err != nil {
 		// even if this fails, we still have the right dispatched items in memory
@@ -657,6 +656,25 @@ func (pq *persistentQueue[T]) rebuildEnqueueTimes(ctx context.Context) {
 	pq.syncOldestEnqueuedLocked()
 }
 
+func (pq *persistentQueue[T]) removeEnqueueTimeLocked(index uint64) {
+	delete(pq.enqueueTimes, index)
+	if len(pq.enqueueHeap) > 2*len(pq.enqueueTimes)+1 {
+		pq.rebuildEnqueueHeapLocked()
+	}
+	pq.syncOldestEnqueuedLocked()
+}
+
+func (pq *persistentQueue[T]) rebuildEnqueueHeapLocked() {
+	pq.enqueueHeap = make(queueOldestHeap, 0, len(pq.enqueueTimes))
+	for index, enqueuedAt := range pq.enqueueTimes {
+		if enqueuedAt.IsZero() {
+			continue
+		}
+		pq.enqueueHeap = append(pq.enqueueHeap, queueOldestEntry{index: index, enqueuedAt: enqueuedAt})
+	}
+	heap.Init(&pq.enqueueHeap)
+}
+
 func (pq *persistentQueue[T]) syncOldestEnqueuedLocked() {
 	for len(pq.enqueueHeap) > 0 {
 		oldest := pq.enqueueHeap[0]
@@ -684,15 +702,38 @@ func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
 }
 
 func unmarshalQueuedItem(payload []byte) ([]byte, time.Time) {
-	if len(payload) < queueItemHeaderSize || string(payload[:len(queueItemTimestampMagic)]) != queueItemTimestampMagic {
-		return payload, time.Time{}
+	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemTimestampMagic, queueItemHeaderSize, false); ok {
+		return unpackedPayload, enqueuedAt
+	}
+	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemLegacyMagic, queueItemLegacyHeaderSize, true); ok {
+		return unpackedPayload, enqueuedAt
+	}
+	return payload, time.Time{}
+}
+
+func unmarshalQueuedItemWithHeader(payload []byte, magic string, headerSize int, validateTime bool) ([]byte, time.Time, bool) {
+	if len(payload) < headerSize || string(payload[:len(magic)]) != magic {
+		return nil, time.Time{}, false
 	}
 
-	unixNano := int64(binary.LittleEndian.Uint64(payload[len(queueItemTimestampMagic):queueItemHeaderSize]))
-	if unixNano <= 0 {
-		return payload[queueItemHeaderSize:], time.Time{}
+	unixNano := int64(binary.LittleEndian.Uint64(payload[len(magic):headerSize]))
+	if validateTime && !isReasonableQueuedItemUnixNano(unixNano) {
+		return nil, time.Time{}, false
 	}
-	return payload[queueItemHeaderSize:], time.Unix(0, unixNano)
+	if unixNano <= 0 {
+		return payload[headerSize:], time.Time{}, true
+	}
+	return payload[headerSize:], time.Unix(0, unixNano), true
+}
+
+func isReasonableQueuedItemUnixNano(unixNano int64) bool {
+	if unixNano <= 0 {
+		return false
+	}
+
+	enqueuedAt := time.Unix(0, unixNano)
+	now := time.Now().Add(24 * time.Hour)
+	return enqueuedAt.After(time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)) && enqueuedAt.Before(now)
 }
 
 func bytesToItemIndex(buf []byte) (uint64, error) {
