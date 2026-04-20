@@ -277,13 +277,28 @@ func TestObsQueueLogsBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalLogs.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 				Min:          metricdata.NewExtrema[int64](2),
 				Max:          metricdata.NewExtrema[int64](2),
 				Sum:          2,
+			},
+		}, metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualExporterQueueBatchSendSizeBytes(t, tt,
+		[]metricdata.HistogramDataPoint[int64]{
+			{
+				Attributes: attribute.NewSet(
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalLogs.String())),
+				Count:        1,
+				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000},
+				BucketCounts: []uint64{0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				Min:          metricdata.NewExtrema[int64](100),
+				Max:          metricdata.NewExtrema[int64](100),
+				Sum:          100,
 			},
 		}, metricdatatest.IgnoreTimestamp())
 }
@@ -303,7 +318,8 @@ func TestObsQueueTracesBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalTraces.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -329,7 +345,8 @@ func TestObsQueueMetricsBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalMetrics.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -355,7 +372,8 @@ func TestObsQueueProfilesBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, xpipeline.SignalProfiles.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},

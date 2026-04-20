@@ -4,6 +4,7 @@
 package queue // import "go.opentelemetry.io/collector/exporter/exporterhelper/internal/queue"
 
 import (
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -97,7 +98,39 @@ type persistentQueue[T request.Request] struct {
 
 	blockOnOverflow bool
 	enqueueTimes    map[uint64]time.Time
+	enqueueHeap     queueOldestHeap
 	oldestEnqueued  time.Time
+}
+
+type queueOldestEntry struct {
+	index      uint64
+	enqueuedAt time.Time
+}
+
+type queueOldestHeap []queueOldestEntry
+
+func (h queueOldestHeap) Len() int {
+	return len(h)
+}
+
+func (h queueOldestHeap) Less(i, j int) bool {
+	return h[i].enqueuedAt.Before(h[j].enqueuedAt)
+}
+
+func (h queueOldestHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *queueOldestHeap) Push(x any) {
+	*h = append(*h, x.(queueOldestEntry))
+}
+
+func (h *queueOldestHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 // newPersistentQueue creates a new queue backed by file storage; name and signal must be a unique combination that identifies the queue storage
@@ -332,9 +365,10 @@ func (pq *persistentQueue[T]) putInternal(ctx context.Context, req T, enqueuedAt
 	}
 
 	pq.enqueueTimes[index] = enqueuedAt
-	if pq.oldestEnqueued.IsZero() || (!enqueuedAt.IsZero() && enqueuedAt.Before(pq.oldestEnqueued)) {
-		pq.oldestEnqueued = enqueuedAt
+	if !enqueuedAt.IsZero() {
+		heap.Push(&pq.enqueueHeap, queueOldestEntry{index: index, enqueuedAt: enqueuedAt})
 	}
+	pq.syncOldestEnqueuedLocked()
 
 	pq.hasMoreElements.Signal()
 
@@ -552,7 +586,7 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 	err = pq.client.Batch(ctx, setOp, deleteOp)
 	if err == nil {
 		delete(pq.enqueueTimes, index)
-		pq.recomputeOldestEnqueuedLocked()
+		pq.syncOldestEnqueuedLocked()
 		// Everything ok, exit
 		return nil
 	}
@@ -567,7 +601,7 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 	}
 
 	delete(pq.enqueueTimes, index)
-	pq.recomputeOldestEnqueuedLocked()
+	pq.syncOldestEnqueuedLocked()
 
 	if err = pq.client.Batch(ctx, setOp); err != nil {
 		// even if this fails, we still have the right dispatched items in memory
@@ -597,6 +631,7 @@ func (pq *persistentQueue[T]) rebuildEnqueueTimes(ctx context.Context) {
 	defer pq.mu.Unlock()
 
 	pq.enqueueTimes = make(map[uint64]time.Time)
+	pq.enqueueHeap = nil
 	pq.oldestEnqueued = time.Time{}
 
 	indices := make(map[uint64]struct{}, pq.metadata.WriteIndex-pq.metadata.ReadIndex+uint64(len(pq.metadata.CurrentlyDispatchedItems)))
@@ -617,19 +652,23 @@ func (pq *persistentQueue[T]) rebuildEnqueueTimes(ctx context.Context) {
 			continue
 		}
 		pq.enqueueTimes[index] = enqueuedAt
-		if pq.oldestEnqueued.IsZero() || enqueuedAt.Before(pq.oldestEnqueued) {
-			pq.oldestEnqueued = enqueuedAt
-		}
+		heap.Push(&pq.enqueueHeap, queueOldestEntry{index: index, enqueuedAt: enqueuedAt})
 	}
+	pq.syncOldestEnqueuedLocked()
 }
 
-func (pq *persistentQueue[T]) recomputeOldestEnqueuedLocked() {
-	pq.oldestEnqueued = time.Time{}
-	for _, enqueuedAt := range pq.enqueueTimes {
-		if pq.oldestEnqueued.IsZero() || enqueuedAt.Before(pq.oldestEnqueued) {
-			pq.oldestEnqueued = enqueuedAt
+func (pq *persistentQueue[T]) syncOldestEnqueuedLocked() {
+	for len(pq.enqueueHeap) > 0 {
+		oldest := pq.enqueueHeap[0]
+		enqueuedAt, ok := pq.enqueueTimes[oldest.index]
+		if !ok || enqueuedAt.IsZero() || !enqueuedAt.Equal(oldest.enqueuedAt) {
+			heap.Pop(&pq.enqueueHeap)
+			continue
 		}
+		pq.oldestEnqueued = enqueuedAt
+		return
 	}
+	pq.oldestEnqueued = time.Time{}
 }
 
 func getItemKey(index uint64) string {

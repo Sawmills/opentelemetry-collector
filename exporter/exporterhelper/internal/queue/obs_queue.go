@@ -29,7 +29,8 @@ const (
 type obsQueue[T request.Request] struct {
 	Queue[T]
 	tb                      *metadata.TelemetryBuilder
-	metricAttr              metric.MeasurementOption
+	enqueueFailedAttr       metric.MeasurementOption
+	sendMetricAttr          metric.MeasurementOption
 	enqueueFailedInst       metric.Int64Counter
 	queueBatchSizeInst      metric.Int64Histogram
 	queueBatchSizeBytesInst metric.Int64Histogram
@@ -71,10 +72,11 @@ func newObsQueue[T request.Request](set Settings[T], delegate Queue[T]) (Queue[T
 	tracer := metadata.Tracer(set.Telemetry)
 
 	or := &obsQueue[T]{
-		Queue:      delegate,
-		tb:         tb,
-		metricAttr: metric.WithAttributeSet(attribute.NewSet(exporterAttr)),
-		tracer:     tracer,
+		Queue:             delegate,
+		tb:                tb,
+		enqueueFailedAttr: metric.WithAttributeSet(attribute.NewSet(exporterAttr)),
+		sendMetricAttr:    asyncAttr,
+		tracer:            tracer,
 	}
 
 	switch set.Signal {
@@ -104,8 +106,8 @@ func (or *obsQueue[T]) Offer(ctx context.Context, req T) error {
 	// be modified by the downstream components like the batcher.
 	numItems := req.ItemsCount()
 
-	or.queueBatchSizeInst.Record(ctx, int64(numItems), or.metricAttr)
-	or.queueBatchSizeBytesInst.Record(ctx, int64(req.BytesSize()), or.metricAttr)
+	or.queueBatchSizeInst.Record(ctx, int64(numItems), or.sendMetricAttr)
+	or.queueBatchSizeBytesInst.Record(ctx, int64(req.BytesSize()), or.sendMetricAttr)
 
 	ctx, span := or.tracer.Start(ctx, "exporter/enqueue")
 	err := or.Queue.Offer(ctx, req)
@@ -113,7 +115,7 @@ func (or *obsQueue[T]) Offer(ctx context.Context, req T) error {
 
 	// No metrics recorded for profiles, remove enqueueFailedInst check with nil when profiles metrics available.
 	if err != nil && or.enqueueFailedInst != nil {
-		or.enqueueFailedInst.Add(ctx, int64(numItems), or.metricAttr)
+		or.enqueueFailedInst.Add(ctx, int64(numItems), or.enqueueFailedAttr)
 	}
 	return err
 }

@@ -4,6 +4,7 @@
 package queue
 
 import (
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -891,6 +892,38 @@ func TestUnmarshalQueuedItemDoesNotMisclassifyLegacyPayloadPrefix(t *testing.T) 
 
 	require.Equal(t, payload, unmarshaledPayload)
 	require.True(t, unmarshaledTime.IsZero())
+}
+
+func TestPersistentQueueSyncOldestEnqueuedLockedSkipsDeletedEntries(t *testing.T) {
+	pq := createTestPersistentQueueWithClient(newFakeBoundedStorageClient(4096))
+	first := time.Unix(0, 100)
+	second := time.Unix(0, 200)
+	third := time.Unix(0, 300)
+
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	pq.enqueueTimes[0] = first
+	pq.enqueueTimes[1] = second
+	pq.enqueueTimes[2] = third
+	heap.Push(&pq.enqueueHeap, queueOldestEntry{index: 0, enqueuedAt: first})
+	heap.Push(&pq.enqueueHeap, queueOldestEntry{index: 1, enqueuedAt: second})
+	heap.Push(&pq.enqueueHeap, queueOldestEntry{index: 2, enqueuedAt: third})
+
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, first, pq.oldestEnqueued)
+
+	delete(pq.enqueueTimes, 0)
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, second, pq.oldestEnqueued)
+
+	delete(pq.enqueueTimes, 1)
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, third, pq.oldestEnqueued)
+
+	delete(pq.enqueueTimes, 2)
+	pq.syncOldestEnqueuedLocked()
+	require.True(t, pq.oldestEnqueued.IsZero())
 }
 
 func TestPersistentQueue_ShutdownWhileConsuming(t *testing.T) {
