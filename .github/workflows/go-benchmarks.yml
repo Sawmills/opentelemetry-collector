@@ -43,8 +43,19 @@ jobs:
             fi
           fi
 
+      - name: Detect CodSpeed token
+        id: codspeed
+        env:
+          CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN }}
+        run: |
+          if [ -n "$CODSPEED_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run the benchmarks with CodSpeed
-        if: env.SKIP_BENCH != 'true' && secrets.CODSPEED_TOKEN != ''
+        if: env.SKIP_BENCH != 'true' && steps.codspeed.outputs.available == 'true'
         uses: CodSpeedHQ/action@d872884a306dd4853acf0f584f4b706cf0cc72a2 # v4.13.0
         with:
           mode: walltime
@@ -53,5 +64,5 @@ jobs:
           cache-instruments: true
 
       - name: Run the benchmarks without CodSpeed upload
-        if: env.SKIP_BENCH != 'true' && secrets.CODSPEED_TOKEN == ''
+        if: env.SKIP_BENCH != 'true' && steps.codspeed.outputs.available != 'true'
         run: make for-all-target TARGET="timebenchmark" GOMODULES="${{ env.TARGET_MODULES }}"
