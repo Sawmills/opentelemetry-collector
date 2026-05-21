@@ -10,6 +10,7 @@ on:
 jobs:
   benchmarks:
     name: Run benchmarks
+    if: github.repository == 'open-telemetry/opentelemetry-collector' || vars.CODSPEED_ENABLED == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
