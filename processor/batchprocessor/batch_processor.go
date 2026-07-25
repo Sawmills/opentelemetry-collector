@@ -140,9 +140,9 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 			}
 		} else {
 			shards := make([]*shard[T], 0, numShards)
-			inputBufferSize := max(runtime.NumCPU()/numShards, 1)
-			for range numShards {
-				shards = append(shards, bp.newShard(nil, inputBufferSize))
+			totalInputBufferSize := runtime.NumCPU()
+			for i := range numShards {
+				shards = append(shards, bp.newShard(nil, shardInputBufferSize(totalInputBufferSize, numShards, i)))
 			}
 			bp.batcher = &fixedShardBatcher[T]{
 				shards: shards,
@@ -167,6 +167,17 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 	bp.telemetry = bpt
 
 	return bp, nil
+}
+
+// shardInputBufferSize divides the legacy input-channel capacity exactly
+// across fixed shards. Earlier shards receive one extra slot when the capacity
+// does not divide evenly.
+func shardInputBufferSize(total, numShards, shardIndex int) int {
+	size := total / numShards
+	if shardIndex < total%numShards {
+		size++
+	}
+	return size
 }
 
 // newShard gets or creates a batcher corresponding with attrs.

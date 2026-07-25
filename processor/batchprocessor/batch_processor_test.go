@@ -861,6 +861,47 @@ func (s *blockingLogsSink) ConsumeLogs(_ context.Context, ld plog.Logs) error {
 	return nil
 }
 
+func TestShardInputBufferSizePreservesAggregateCapacity(t *testing.T) {
+	tests := []struct {
+		name      string
+		total     int
+		numShards int
+		expected  []int
+	}{
+		{
+			name:      "even",
+			total:     8,
+			numShards: 4,
+			expected:  []int{2, 2, 2, 2},
+		},
+		{
+			name:      "remainder",
+			total:     10,
+			numShards: 4,
+			expected:  []int{3, 3, 2, 2},
+		},
+		{
+			name:      "more shards than capacity",
+			total:     2,
+			numShards: 4,
+			expected:  []int{1, 1, 0, 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := make([]int, tt.numShards)
+			total := 0
+			for i := range tt.numShards {
+				actual[i] = shardInputBufferSize(tt.total, tt.numShards, i)
+				total += actual[i]
+			}
+			require.Equal(t, tt.expected, actual)
+			require.Equal(t, tt.total, total)
+		})
+	}
+}
+
 func TestFixedShardsRunDownstreamConcurrentlyAndDrain(t *testing.T) {
 	numShards := min(4, runtime.GOMAXPROCS(0))
 	if numShards < 2 {
