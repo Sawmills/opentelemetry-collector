@@ -13,6 +13,14 @@ tests:
 
 telemetry:
   metrics:
+    processor_batch_active_shards:
+      enabled: true
+      stability: development
+      description: Number of active batch shards
+      unit: "{shard}"
+      sum:
+        value_type: int
+        async: true
     processor_batch_batch_send_size:
       enabled: true
       stability: development

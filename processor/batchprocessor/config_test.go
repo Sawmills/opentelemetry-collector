@@ -34,6 +34,7 @@ func TestUnmarshalConfig(t *testing.T) {
 			SendBatchMaxSize:         uint32(11000),
 			Timeout:                  time.Second * 10,
 			MetadataCardinalityLimit: 1000,
+			NumShards:                4,
 		}, cfg)
 }
 
@@ -71,4 +72,35 @@ func TestValidateConfig_InvalidTimeout(t *testing.T) {
 func TestValidateConfig_ValidZero(t *testing.T) {
 	cfg := &Config{}
 	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidateConfig_NumShardsWithMetadataKeys(t *testing.T) {
+	cfg := &Config{
+		MetadataKeys: []string{"tenant"},
+		NumShards:    2,
+	}
+	assert.ErrorContains(t, cfg.Validate(), "cannot be combined")
+}
+
+func TestValidateConfig_NumShardsBounded(t *testing.T) {
+	cfg := &Config{
+		NumShards: maxNumShards + 1,
+	}
+	assert.ErrorContains(t, cfg.Validate(), "num_shards must be less than or equal")
+}
+
+func TestDefaultConfig_NumShards(t *testing.T) {
+	cfg := NewFactory().CreateDefaultConfig().(*Config)
+	assert.Equal(t, uint32(1), cfg.NumShards)
+}
+
+func TestMarshalConfig_OmitsDisabledNumShards(t *testing.T) {
+	cfg := &Config{}
+	cm := confmap.New()
+	require.NoError(t, cm.Marshal(cfg))
+	assert.NotContains(t, cm.ToStringMap(), "num_shards")
+
+	cfg.NumShards = 4
+	require.NoError(t, cm.Marshal(cfg))
+	assert.Equal(t, uint32(4), cm.ToStringMap()["num_shards"])
 }

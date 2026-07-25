@@ -7,8 +7,11 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"regexp"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -735,6 +738,78 @@ func BenchmarkMultiBatchMetricProcessor2k(b *testing.B) {
 	runMetricsProcessorBenchmark(b, cfg)
 }
 
+func BenchmarkFixedShardBatchMetricProcessor2k(b *testing.B) {
+	b.StopTimer()
+	cfg := &Config{
+		Timeout:       100 * time.Millisecond,
+		SendBatchSize: 2000,
+		NumShards:     uint32(min(4, runtime.GOMAXPROCS(0))),
+	}
+	runMetricsProcessorBenchmark(b, cfg)
+}
+
+type regexLogsSink struct {
+	pattern *regexp.Regexp
+	count   atomic.Int64
+}
+
+func (s *regexLogsSink) Capabilities() consumer.Capabilities {
+	return consumer.Capabilities{MutatesData: false}
+}
+
+func (s *regexLogsSink) ConsumeLogs(_ context.Context, ld plog.Logs) error {
+	var matches int64
+	for _, resourceLogs := range ld.ResourceLogs().All() {
+		for _, scopeLogs := range resourceLogs.ScopeLogs().All() {
+			for _, record := range scopeLogs.LogRecords().All() {
+				body := record.Body().Str()
+				for range 500 {
+					if s.pattern.MatchString(body) {
+						matches++
+					}
+				}
+			}
+		}
+	}
+	s.count.Add(matches)
+	return nil
+}
+
+func BenchmarkBatchShardScaling(b *testing.B) {
+	maxShards := min(4, runtime.GOMAXPROCS(0))
+	for _, numShards := range []int{1, maxShards} {
+		b.Run(fmt.Sprintf("shards_%d", numShards), func(b *testing.B) {
+			sink := &regexLogsSink{
+				pattern: regexp.MustCompile(`(?:customer|tenant)-[a-z0-9]+-(?:error|timeout)`),
+			}
+			cfg := createDefaultConfig().(*Config)
+			cfg.Timeout = 0
+			cfg.SendBatchSize = 1
+			cfg.NumShards = uint32(numShards)
+
+			logs, err := NewFactory().CreateLogs(
+				context.Background(),
+				processortest.NewNopSettings(metadata.Type),
+				cfg,
+				sink,
+			)
+			require.NoError(b, err)
+			require.NoError(b, logs.Start(context.Background(), componenttest.NewNopHost()))
+
+			b.ResetTimer()
+			for b.Loop() {
+				ld := testdata.GenerateLogs(1)
+				ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).
+					Body().SetStr("customer-bigid-tenant-123456789-error")
+				require.NoError(b, logs.ConsumeLogs(context.Background(), ld))
+			}
+			require.NoError(b, logs.Shutdown(context.Background()))
+			b.StopTimer()
+			require.Equal(b, int64(b.N*500), sink.count.Load())
+		})
+	}
+}
+
 func runMetricsProcessorBenchmark(b *testing.B, cfg *Config) {
 	ctx := context.Background()
 	sink := new(metricsSink)
@@ -757,6 +832,119 @@ func runMetricsProcessorBenchmark(b *testing.B, cfg *Config) {
 type metricsSink struct {
 	mu           sync.Mutex
 	metricsCount int
+}
+
+type blockingLogsSink struct {
+	active  atomic.Int64
+	max     atomic.Int64
+	count   atomic.Int64
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingLogsSink) Capabilities() consumer.Capabilities {
+	return consumer.Capabilities{MutatesData: false}
+}
+
+func (s *blockingLogsSink) ConsumeLogs(_ context.Context, ld plog.Logs) error {
+	active := s.active.Add(1)
+	for {
+		currentMax := s.max.Load()
+		if active <= currentMax || s.max.CompareAndSwap(currentMax, active) {
+			break
+		}
+	}
+	s.started <- struct{}{}
+	<-s.release
+	s.count.Add(int64(ld.LogRecordCount()))
+	s.active.Add(-1)
+	return nil
+}
+
+func TestFixedShardsRunDownstreamConcurrentlyAndDrain(t *testing.T) {
+	numShards := min(4, runtime.GOMAXPROCS(0))
+	if numShards < 2 {
+		t.Skip("test requires at least two available processors")
+	}
+
+	sink := &blockingLogsSink{
+		started: make(chan struct{}, numShards),
+		release: make(chan struct{}),
+	}
+	cfg := createDefaultConfig().(*Config)
+	cfg.Timeout = 0
+	cfg.SendBatchSize = 1
+	cfg.NumShards = uint32(numShards)
+
+	logs, err := NewFactory().CreateLogs(
+		context.Background(),
+		processortest.NewNopSettings(metadata.Type),
+		cfg,
+		sink,
+	)
+	require.NoError(t, err)
+	require.NoError(t, logs.Start(context.Background(), componenttest.NewNopHost()))
+
+	processor := logs.(*logsBatchProcessor)
+	require.Equal(t, 1, processor.batcher.currentMetadataCardinality())
+	require.Equal(t, numShards, processor.batcher.currentShardCount())
+
+	for range numShards {
+		require.NoError(t, logs.ConsumeLogs(context.Background(), testdata.GenerateLogs(1)))
+	}
+	for range numShards {
+		select {
+		case <-sink.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for all batch shards")
+		}
+	}
+	require.Equal(t, int64(numShards), sink.max.Load())
+
+	close(sink.release)
+	require.NoError(t, logs.Shutdown(context.Background()))
+	require.Equal(t, int64(numShards), sink.count.Load())
+}
+
+func TestFixedShardsConcurrentConsume(t *testing.T) {
+	numShards := min(4, runtime.GOMAXPROCS(0))
+	if numShards < 2 {
+		t.Skip("test requires at least two available processors")
+	}
+
+	const (
+		requestCount   = 100
+		logsPerRequest = 3
+	)
+	cfg := createDefaultConfig().(*Config)
+	cfg.Timeout = time.Minute
+	cfg.SendBatchSize = 50
+	cfg.NumShards = uint32(numShards)
+	sink := new(consumertest.LogsSink)
+	logs, err := NewFactory().CreateLogs(
+		context.Background(),
+		processortest.NewNopSettings(metadata.Type),
+		cfg,
+		sink,
+	)
+	require.NoError(t, err)
+	require.NoError(t, logs.Start(context.Background(), componenttest.NewNopHost()))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, requestCount)
+	for range requestCount {
+		wg.Go(func() {
+			errs <- logs.ConsumeLogs(context.Background(), testdata.GenerateLogs(logsPerRequest))
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, logs.Shutdown(context.Background()))
+	require.Equal(t, requestCount*logsPerRequest, sink.LogRecordCount())
 }
 
 func (sme *metricsSink) Capabilities() consumer.Capabilities {

@@ -20,6 +20,10 @@ func TestSetupTelemetry(t *testing.T) {
 	tb, err := metadata.NewTelemetryBuilder(testTel.NewTelemetrySettings())
 	require.NoError(t, err)
 	defer tb.Shutdown()
+	require.NoError(t, tb.RegisterProcessorBatchActiveShardsCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(1)
+		return nil
+	}))
 	require.NoError(t, tb.RegisterProcessorBatchMetadataCardinalityCallback(func(_ context.Context, observer metric.Int64Observer) error {
 		observer.Observe(1)
 		return nil
@@ -28,6 +32,9 @@ func TestSetupTelemetry(t *testing.T) {
 	tb.ProcessorBatchBatchSendSizeBytes.Record(context.Background(), 1)
 	tb.ProcessorBatchBatchSizeTriggerSend.Add(context.Background(), 1)
 	tb.ProcessorBatchTimeoutTriggerSend.Add(context.Background(), 1)
+	AssertEqualProcessorBatchActiveShards(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorBatchBatchSendSize(t, testTel,
 		[]metricdata.HistogramDataPoint[int64]{{}}, metricdatatest.IgnoreValue(),
 		metricdatatest.IgnoreTimestamp())

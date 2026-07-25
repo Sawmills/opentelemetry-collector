@@ -28,7 +28,11 @@ type batchProcessorTelemetry struct {
 	telemetryBuilder *metadata.TelemetryBuilder
 }
 
-func newBatchProcessorTelemetry(set processor.Settings, currentMetadataCardinality func() int) (*batchProcessorTelemetry, error) {
+func newBatchProcessorTelemetry(
+	set processor.Settings,
+	currentMetadataCardinality func() int,
+	currentShardCount func() int,
+) (*batchProcessorTelemetry, error) {
 	attrs := metric.WithAttributeSet(attribute.NewSet(attribute.String(internal.ProcessorKey, set.ID.String())))
 
 	telemetryBuilder, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
@@ -37,6 +41,13 @@ func newBatchProcessorTelemetry(set processor.Settings, currentMetadataCardinali
 	}
 	err = telemetryBuilder.RegisterProcessorBatchMetadataCardinalityCallback(func(_ context.Context, observer metric.Int64Observer) error {
 		observer.Observe(int64(currentMetadataCardinality()), attrs)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	err = telemetryBuilder.RegisterProcessorBatchActiveShardsCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(int64(currentShardCount()), attrs)
 		return nil
 	})
 	if err != nil {
