@@ -6,6 +6,14 @@
 
 The following telemetry is emitted by this component.
 
+### otelcol_processor_batch_active_shards
+
+Number of active batch shards
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {shard} | Sum | Int | false | Development |
+
 ### otelcol_processor_batch_batch_send_size
 
 Number of units in the batch

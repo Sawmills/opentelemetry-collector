@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -65,8 +66,11 @@ type batcher[T any] interface {
 	// consume incorporates a new item of data into the pending batch.
 	consume(ctx context.Context, data T) error
 
-	// currentMetadataCardinality returns the number of shards.
+	// currentMetadataCardinality returns the number of metadata combinations.
 	currentMetadataCardinality() int
+
+	// currentShardCount returns the number of running batch shards.
+	currentShardCount() int
 }
 
 // shard is a single instance of the batch logic.  When metadata
@@ -127,10 +131,22 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		batchFunc:        batchFunc,
 		shutdownC:        make(chan struct{}, 1),
 	}
+	numShards := min(max(int(cfg.NumShards), 1), runtime.GOMAXPROCS(0))
 	if len(mks) == 0 {
-		bp.batcher = &singleShardBatcher[T]{
-			processor: bp,
-			single:    bp.newShard(nil),
+		if numShards == 1 {
+			bp.batcher = &singleShardBatcher[T]{
+				processor: bp,
+				single:    bp.newShard(nil, runtime.NumCPU()),
+			}
+		} else {
+			shards := make([]*shard[T], 0, numShards)
+			totalInputBufferSize := runtime.NumCPU()
+			for i := range numShards {
+				shards = append(shards, bp.newShard(nil, shardInputBufferSize(totalInputBufferSize, numShards, i)))
+			}
+			bp.batcher = &fixedShardBatcher[T]{
+				shards: shards,
+			}
 		}
 	} else {
 		bp.batcher = &multiShardBatcher[T]{
@@ -140,7 +156,11 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		}
 	}
 
-	bpt, err := newBatchProcessorTelemetry(set, bp.batcher.currentMetadataCardinality)
+	bpt, err := newBatchProcessorTelemetry(
+		set,
+		bp.batcher.currentMetadataCardinality,
+		bp.batcher.currentShardCount,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating batch processor telemetry: %w", err)
 	}
@@ -149,14 +169,25 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 	return bp, nil
 }
 
+// shardInputBufferSize divides the legacy input-channel capacity exactly
+// across fixed shards. Earlier shards receive one extra slot when the capacity
+// does not divide evenly.
+func shardInputBufferSize(total, numShards, shardIndex int) int {
+	size := total / numShards
+	if shardIndex < total%numShards {
+		size++
+	}
+	return size
+}
+
 // newShard gets or creates a batcher corresponding with attrs.
-func (bp *batchProcessor[T]) newShard(md map[string][]string) *shard[T] {
+func (bp *batchProcessor[T]) newShard(md map[string][]string, inputBufferSize int) *shard[T] {
 	exportCtx := client.NewContext(context.Background(), client.Info{
 		Metadata: client.NewMetadata(md),
 	})
 	b := &shard[T]{
 		processor: bp,
-		newItem:   make(chan T, runtime.NumCPU()),
+		newItem:   make(chan T, inputBufferSize),
 		exportCtx: exportCtx,
 		batch:     bp.batchFunc(),
 	}
@@ -296,6 +327,38 @@ func (sb *singleShardBatcher[T]) currentMetadataCardinality() int {
 	return 1
 }
 
+func (sb *singleShardBatcher[T]) currentShardCount() int {
+	return 1
+}
+
+// fixedShardBatcher distributes data across a bounded set of independent
+// batch shards when metadataKeys is empty.
+type fixedShardBatcher[T any] struct {
+	shards []*shard[T]
+	next   atomic.Uint64
+}
+
+func (fb *fixedShardBatcher[T]) start(context.Context) error {
+	for _, b := range fb.shards {
+		b.start()
+	}
+	return nil
+}
+
+func (fb *fixedShardBatcher[T]) consume(_ context.Context, data T) error {
+	index := fb.next.Add(1) - 1
+	fb.shards[index%uint64(len(fb.shards))].newItem <- data
+	return nil
+}
+
+func (fb *fixedShardBatcher[T]) currentMetadataCardinality() int {
+	return 1
+}
+
+func (fb *fixedShardBatcher[T]) currentShardCount() int {
+	return len(fb.shards)
+}
+
 // multiShardBatcher is used when metadataKeys is not empty.
 type multiShardBatcher[T any] struct {
 	// metadataKeys is the configured list of metadata keys.  When
@@ -353,7 +416,7 @@ func (mb *multiShardBatcher[T]) consume(ctx context.Context, data T) error {
 		for _, k := range mb.metadataKeys {
 			md[k] = info.Metadata.Get(k)
 		}
-		b, loaded = mb.batchers.LoadOrStore(aset, mb.processor.newShard(md))
+		b, loaded = mb.batchers.LoadOrStore(aset, mb.processor.newShard(md, runtime.NumCPU()))
 		if !loaded {
 			// Start the goroutine only if we added the object to the map, otherwise is already started.
 			b.(*shard[T]).start()
@@ -369,6 +432,10 @@ func (mb *multiShardBatcher[T]) currentMetadataCardinality() int {
 	mb.lock.Lock()
 	defer mb.lock.Unlock()
 	return mb.size
+}
+
+func (mb *multiShardBatcher[T]) currentShardCount() int {
+	return mb.currentMetadataCardinality()
 }
 
 type tracesBatchProcessor struct {

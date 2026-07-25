@@ -18,6 +18,7 @@ import (
 const (
 	defaultSendBatchSize = uint32(8192)
 	defaultTimeout       = 200 * time.Millisecond
+	defaultNumShards     = uint32(1)
 
 	// defaultMetadataCardinalityLimit should be set to the number
 	// of metadata configurations the user expects to submit to
@@ -40,6 +41,7 @@ func createDefaultConfig() component.Config {
 		SendBatchSize:            defaultSendBatchSize,
 		Timeout:                  defaultTimeout,
 		MetadataCardinalityLimit: defaultMetadataCardinalityLimit,
+		NumShards:                defaultNumShards,
 	}
 }
 

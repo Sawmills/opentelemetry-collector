@@ -28,6 +28,7 @@ type TelemetryBuilder struct {
 	meter                              metric.Meter
 	mu                                 sync.Mutex
 	registrations                      []metric.Registration
+	ProcessorBatchActiveShards         metric.Int64ObservableUpDownCounter
 	ProcessorBatchBatchSendSize        metric.Int64Histogram
 	ProcessorBatchBatchSendSizeBytes   metric.Int64Histogram
 	ProcessorBatchBatchSizeTriggerSend metric.Int64Counter
@@ -44,6 +45,21 @@ type telemetryBuilderOptionFunc func(mb *TelemetryBuilder)
 
 func (tbof telemetryBuilderOptionFunc) apply(mb *TelemetryBuilder) {
 	tbof(mb)
+}
+
+// RegisterProcessorBatchActiveShardsCallback sets callback for observable ProcessorBatchActiveShards metric.
+func (builder *TelemetryBuilder) RegisterProcessorBatchActiveShardsCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorBatchActiveShards, obs: o})
+		return nil
+	}, builder.ProcessorBatchActiveShards)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
 }
 
 // RegisterProcessorBatchMetadataCardinalityCallback sets callback for observable ProcessorBatchMetadataCardinality metric.
@@ -89,6 +105,12 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 	}
 	builder.meter = Meter(settings)
 	var err, errs error
+	builder.ProcessorBatchActiveShards, err = builder.meter.Int64ObservableUpDownCounter(
+		"otelcol_processor_batch_active_shards",
+		metric.WithDescription("Number of active batch shards [Development]"),
+		metric.WithUnit("{shard}"),
+	)
+	errs = errors.Join(errs, err)
 	builder.ProcessorBatchBatchSendSize, err = builder.meter.Int64Histogram(
 		"otelcol_processor_batch_batch_send_size",
 		metric.WithDescription("Number of units in the batch [Development]"),

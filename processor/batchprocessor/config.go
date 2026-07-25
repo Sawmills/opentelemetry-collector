@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/collector/component"
 )
 
+const maxNumShards = 64
+
 // Config defines configuration for batch processor.
 type Config struct {
 	// Timeout sets the time after which a batch will be sent regardless of size.
@@ -44,6 +46,14 @@ type Config struct {
 	// batcher instances that will be created through a distinct
 	// combination of MetadataKeys.
 	MetadataCardinalityLimit uint32 `mapstructure:"metadata_cardinality_limit"`
+
+	// NumShards controls the number of independent batchers used when
+	// MetadataKeys is empty. Values of zero and one both use the legacy
+	// single batcher. Values greater than one allow downstream consumers to
+	// run concurrently, but may reorder data and hold one pending batch per
+	// shard. Do not enable this for pipelines with stateful or aggregating
+	// downstream components.
+	NumShards uint32 `mapstructure:"num_shards,omitempty"`
 	// prevent unkeyed literal initialization
 	_ struct{}
 }
@@ -65,6 +75,12 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Timeout < 0 {
 		return errors.New("timeout must be greater or equal to 0")
+	}
+	if cfg.NumShards > 1 && len(cfg.MetadataKeys) > 0 {
+		return errors.New("num_shards greater than 1 cannot be combined with metadata_keys")
+	}
+	if cfg.NumShards > maxNumShards {
+		return fmt.Errorf("num_shards must be less than or equal to %d", maxNumShards)
 	}
 	return nil
 }

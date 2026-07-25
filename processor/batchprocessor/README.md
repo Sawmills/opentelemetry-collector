@@ -43,6 +43,12 @@ ignored as data will be sent immediately, subject to only `send_batch_max_size`.
   not empty, this setting limits the number of unique combinations of
   metadata key values that will be processed over the lifetime of the
   process.
+- `num_shards` (default = 1): Number of independent batchers used when
+  `metadata_keys` is empty. Values greater than one allow downstream
+  consumers to run concurrently, but may reorder data and hold one pending
+  batch per shard. Do not enable sharding when downstream processors keep
+  per-stream state or aggregate records. The maximum is the smaller of 64
+  and the runtime's available processor count.
 
 See notes about metadata batching below.
 
@@ -59,6 +65,7 @@ processors:
   batch/2:
     send_batch_size: 10000
     timeout: 10s
+    num_shards: 4
 ```
 
 This configuration will enforce a maximum batch size limit of 10000
