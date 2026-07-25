@@ -48,7 +48,7 @@ ignored as data will be sent immediately, subject to only `send_batch_max_size`.
   consumers to run concurrently, but may reorder data and hold one pending
   batch per shard. Do not enable sharding when downstream processors keep
   per-stream state or aggregate records. The maximum is the smaller of 64
-  and `GOMAXPROCS`.
+  and the runtime's available processor count.
 
 See notes about metadata batching below.
 
