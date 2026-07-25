@@ -1,5 +1,5 @@
 change_type: enhancement
 component: processor/batch
 note: Add bounded fixed sharding for concurrent downstream batch processing.
-issues: []
+issues: [13]
 change_logs: [user, api]
