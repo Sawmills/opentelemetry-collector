@@ -38,6 +38,14 @@ Number of times the batch was sent due to a size trigger
 | ---- | ----------- | ---------- | --------- | --------- |
 | {time} | Sum | Int | true | Development |
 
+### otelcol_processor_batch_batcher_full
+
+Number of consume calls that encountered a full selected batch shard channel
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {call} | Sum | Int | true | Development |
+
 ### otelcol_processor_batch_metadata_cardinality
 
 Number of distinct metadata value combinations being processed
@@ -45,6 +53,22 @@ Number of distinct metadata value combinations being processed
 | Unit | Metric Type | Value Type | Monotonic | Stability |
 | ---- | ----------- | ---------- | --------- | --------- |
 | {combination} | Sum | Int | false | Development |
+
+### otelcol_processor_batch_queue_capacity
+
+Aggregate input-channel capacity across active batch shards
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {item} | Sum | Int | false | Development |
+
+### otelcol_processor_batch_queue_size
+
+Aggregate number of items queued across active batch shards
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {item} | Sum | Int | false | Development |
 
 ### otelcol_processor_batch_timeout_trigger_send
 

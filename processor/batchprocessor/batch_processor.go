@@ -71,6 +71,12 @@ type batcher[T any] interface {
 
 	// currentShardCount returns the number of running batch shards.
 	currentShardCount() int
+
+	// currentQueueSize returns the aggregate number of queued items.
+	currentQueueSize() int
+
+	// currentQueueCapacity returns the aggregate input-channel capacity.
+	currentQueueCapacity() int
 }
 
 // shard is a single instance of the batch logic.  When metadata
@@ -139,19 +145,15 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 				single:    bp.newShard(nil, runtime.NumCPU()),
 			}
 		} else {
-			shards := make([]*shard[T], 0, numShards)
-			totalInputBufferSize := runtime.NumCPU()
-			for i := range numShards {
-				shards = append(shards, bp.newShard(nil, shardInputBufferSize(totalInputBufferSize, numShards, i)))
-			}
 			bp.batcher = &fixedShardBatcher[T]{
-				shards: shards,
+				set: bp.newShardSet(nil, numShards),
 			}
 		}
 	} else {
 		bp.batcher = &multiShardBatcher[T]{
 			metadataKeys:  mks,
 			metadataLimit: int(cfg.MetadataCardinalityLimit),
+			numShards:     numShards,
 			processor:     bp,
 		}
 	}
@@ -160,6 +162,8 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		set,
 		bp.batcher.currentMetadataCardinality,
 		bp.batcher.currentShardCount,
+		bp.batcher.currentQueueSize,
+		bp.batcher.currentQueueCapacity,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating batch processor telemetry: %w", err)
@@ -194,6 +198,18 @@ func (bp *batchProcessor[T]) newShard(md map[string][]string, inputBufferSize in
 	return b
 }
 
+func (bp *batchProcessor[T]) newShardSet(md map[string][]string, numShards int) *shardSet[T] {
+	shards := make([]*shard[T], 0, numShards)
+	totalInputBufferSize := runtime.NumCPU()
+	for i := range numShards {
+		shards = append(
+			shards,
+			bp.newShard(md, shardInputBufferSize(totalInputBufferSize, numShards, i)),
+		)
+	}
+	return &shardSet[T]{shards: shards}
+}
+
 func (bp *batchProcessor[T]) Capabilities() consumer.Capabilities {
 	return consumer.Capabilities{MutatesData: true}
 }
@@ -215,6 +231,15 @@ func (bp *batchProcessor[T]) Shutdown(context.Context) error {
 
 func (b *shard[T]) start() {
 	b.processor.goroutines.Go(b.startLoop)
+}
+
+func (b *shard[T]) enqueue(data T) {
+	select {
+	case b.newItem <- data:
+	default:
+		b.processor.telemetry.recordBatcherFull()
+		b.newItem <- data
+	}
 }
 
 func (b *shard[T]) startLoop() {
@@ -319,7 +344,7 @@ func (sb *singleShardBatcher[T]) start(context.Context) error {
 }
 
 func (sb *singleShardBatcher[T]) consume(_ context.Context, data T) error {
-	sb.single.newItem <- data
+	sb.single.enqueue(data)
 	return nil
 }
 
@@ -331,23 +356,60 @@ func (sb *singleShardBatcher[T]) currentShardCount() int {
 	return 1
 }
 
-// fixedShardBatcher distributes data across a bounded set of independent
-// batch shards when metadataKeys is empty.
-type fixedShardBatcher[T any] struct {
+func (sb *singleShardBatcher[T]) currentQueueSize() int {
+	return len(sb.single.newItem)
+}
+
+func (sb *singleShardBatcher[T]) currentQueueCapacity() int {
+	return cap(sb.single.newItem)
+}
+
+// shardSet distributes data across a bounded set of independent batch shards.
+type shardSet[T any] struct {
 	shards []*shard[T]
 	next   atomic.Uint64
 }
 
-func (fb *fixedShardBatcher[T]) start(context.Context) error {
-	for _, b := range fb.shards {
+func (ss *shardSet[T]) start() {
+	for _, b := range ss.shards {
 		b.start()
 	}
+}
+
+func (ss *shardSet[T]) consume(data T) {
+	index := ss.next.Add(1) - 1
+	selected := ss.shards[index%uint64(len(ss.shards))]
+	selected.enqueue(data)
+}
+
+func (ss *shardSet[T]) currentQueueSize() int {
+	size := 0
+	for _, shard := range ss.shards {
+		size += len(shard.newItem)
+	}
+	return size
+}
+
+func (ss *shardSet[T]) currentQueueCapacity() int {
+	capacity := 0
+	for _, shard := range ss.shards {
+		capacity += cap(shard.newItem)
+	}
+	return capacity
+}
+
+// fixedShardBatcher distributes metadata-free data through one shard set.
+type fixedShardBatcher[T any] struct {
+	set *shardSet[T]
+}
+
+func (fb *fixedShardBatcher[T]) start(context.Context) error {
+	fb.set.start()
 	return nil
 }
 
 func (fb *fixedShardBatcher[T]) consume(_ context.Context, data T) error {
-	index := fb.next.Add(1) - 1
-	fb.shards[index%uint64(len(fb.shards))].newItem <- data
+	fb.set.consume(data)
 	return nil
 }
 
@@ -356,7 +418,15 @@ func (fb *fixedShardBatcher[T]) currentMetadataCardinality() int {
 }
 
 func (fb *fixedShardBatcher[T]) currentShardCount() int {
-	return len(fb.shards)
+	return len(fb.set.shards)
+}
+
+func (fb *fixedShardBatcher[T]) currentQueueSize() int {
+	return fb.set.currentQueueSize()
+}
+
+func (fb *fixedShardBatcher[T]) currentQueueCapacity() int {
+	return fb.set.currentQueueCapacity()
 }
 
 // multiShardBatcher is used when metadataKeys is not empty.
@@ -370,6 +440,7 @@ type multiShardBatcher[T any] struct {
 	// metadataLimit is the limiting size of the batchers map.
 	metadataLimit int
 
+	numShards int
 	processor *batchProcessor[T]
 	batchers  sync.Map
 
@@ -416,15 +487,15 @@ func (mb *multiShardBatcher[T]) consume(ctx context.Context, data T) error {
 		for _, k := range mb.metadataKeys {
 			md[k] = info.Metadata.Get(k)
 		}
-		b, loaded = mb.batchers.LoadOrStore(aset, mb.processor.newShard(md, runtime.NumCPU()))
+		b, loaded = mb.batchers.LoadOrStore(aset, mb.processor.newShardSet(md, mb.numShards))
 		if !loaded {
-			// Start the goroutine only if we added the object to the map, otherwise is already started.
-			b.(*shard[T]).start()
+			// Start the goroutines only if we added the set to the map.
+			b.(*shardSet[T]).start()
 			mb.size++
 		}
 		mb.lock.Unlock()
 	}
-	b.(*shard[T]).newItem <- data
+	b.(*shardSet[T]).consume(data)
 	return nil
 }
 
@@ -435,7 +506,25 @@ func (mb *multiShardBatcher[T]) currentMetadataCardinality() int {
 }
 
 func (mb *multiShardBatcher[T]) currentShardCount() int {
-	return mb.currentMetadataCardinality()
+	return mb.currentMetadataCardinality() * mb.numShards
+}
+
+func (mb *multiShardBatcher[T]) currentQueueSize() int {
+	size := 0
+	mb.batchers.Range(func(_, value any) bool {
+		size += value.(*shardSet[T]).currentQueueSize()
+		return true
+	})
+	return size
+}
+
+func (mb *multiShardBatcher[T]) currentQueueCapacity() int {
+	capacity := 0
+	mb.batchers.Range(func(_, value any) bool {
+		capacity += value.(*shardSet[T]).currentQueueCapacity()
+		return true
+	})
+	return capacity
 }
 
 type tracesBatchProcessor struct {

@@ -110,11 +110,35 @@ telemetry:
       sum:
         value_type: int
         monotonic: true
+    processor_batch_batcher_full:
+      enabled: true
+      stability: development
+      description: Number of consume calls that encountered a full selected batch shard channel
+      unit: "{call}"
+      sum:
+        value_type: int
+        monotonic: true
     processor_batch_metadata_cardinality:
       enabled: true
       stability: development
       description: Number of distinct metadata value combinations being processed
       unit: "{combination}"
+      sum:
+        value_type: int
+        async: true
+    processor_batch_queue_capacity:
+      enabled: true
+      stability: development
+      description: Aggregate input-channel capacity across active batch shards
+      unit: "{item}"
+      sum:
+        value_type: int
+        async: true
+    processor_batch_queue_size:
+      enabled: true
+      stability: development
+      description: Aggregate number of items queued across active batch shards
+      unit: "{item}"
       sum:
         value_type: int
         async: true

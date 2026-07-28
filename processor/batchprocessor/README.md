@@ -43,12 +43,13 @@ ignored as data will be sent immediately, subject to only `send_batch_max_size`.
   not empty, this setting limits the number of unique combinations of
   metadata key values that will be processed over the lifetime of the
   process.
-- `num_shards` (default = 1): Number of independent batchers used when
-  `metadata_keys` is empty. Values greater than one allow downstream
-  consumers to run concurrently, but may reorder data and hold one pending
-  batch per shard. Do not enable sharding when downstream processors keep
-  per-stream state or aggregate records. The maximum is the smaller of 64
-  and the runtime's available processor count.
+- `num_shards` (default = 1): Number of independent batch workers. With
+  `metadata_keys`, each metadata combination owns this many workers. Values
+  greater than one allow downstream consumers to run concurrently, but may
+  reorder same-metadata data and hold one pending batch per worker. Enable
+  sharding only when every downstream component is safe for concurrent
+  consumption. The maximum is the smaller of 64 and the runtime's available
+  processor count.
 
 See notes about metadata batching below.
 
@@ -116,6 +117,11 @@ limit memory impact.
 Users of the batching processor configured with metadata keys should
 consider use of an Auth extension to validate the relevant
 metadata-key values.
+
+`num_shards` does not change the metadata cardinality limit. It controls the
+bounded worker count within each metadata combination, while aggregate
+input-channel capacity for that combination remains fixed and is divided among
+its workers.
 
 The number of batch processors currently in use is exported as the
 `otelcol_processor_batch_metadata_cardinality` metric.

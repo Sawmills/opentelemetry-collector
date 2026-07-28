@@ -32,10 +32,26 @@ func newBatchProcessorTelemetry(
 	set processor.Settings,
 	currentMetadataCardinality func() int,
 	currentShardCount func() int,
+	currentQueueSize func() int,
+	currentQueueCapacity func() int,
 ) (*batchProcessorTelemetry, error) {
 	attrs := metric.WithAttributeSet(attribute.NewSet(attribute.String(internal.ProcessorKey, set.ID.String())))
 
 	telemetryBuilder, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	if err != nil {
+		return nil, err
+	}
+	err = telemetryBuilder.RegisterProcessorBatchQueueSizeCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(int64(currentQueueSize()), attrs)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	err = telemetryBuilder.RegisterProcessorBatchQueueCapacityCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(int64(currentQueueCapacity()), attrs)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -59,6 +75,10 @@ func newBatchProcessorTelemetry(
 		telemetryBuilder: telemetryBuilder,
 		processorAttr:    attrs,
 	}, nil
+}
+
+func (bpt *batchProcessorTelemetry) recordBatcherFull() {
+	bpt.telemetryBuilder.ProcessorBatchBatcherFull.Add(bpt.exportCtx, 1, bpt.processorAttr)
 }
 
 func (bpt *batchProcessorTelemetry) record(trigger trigger, sent, bytes int64) {

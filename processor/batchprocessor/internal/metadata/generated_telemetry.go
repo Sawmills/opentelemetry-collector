@@ -32,7 +32,10 @@ type TelemetryBuilder struct {
 	ProcessorBatchBatchSendSize        metric.Int64Histogram
 	ProcessorBatchBatchSendSizeBytes   metric.Int64Histogram
 	ProcessorBatchBatchSizeTriggerSend metric.Int64Counter
+	ProcessorBatchBatcherFull          metric.Int64Counter
 	ProcessorBatchMetadataCardinality  metric.Int64ObservableUpDownCounter
+	ProcessorBatchQueueCapacity        metric.Int64ObservableUpDownCounter
+	ProcessorBatchQueueSize            metric.Int64ObservableUpDownCounter
 	ProcessorBatchTimeoutTriggerSend   metric.Int64Counter
 }
 
@@ -68,6 +71,36 @@ func (builder *TelemetryBuilder) RegisterProcessorBatchMetadataCardinalityCallba
 		cb(ctx, &observerInt64{inst: builder.ProcessorBatchMetadataCardinality, obs: o})
 		return nil
 	}, builder.ProcessorBatchMetadataCardinality)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorBatchQueueCapacityCallback sets callback for observable ProcessorBatchQueueCapacity metric.
+func (builder *TelemetryBuilder) RegisterProcessorBatchQueueCapacityCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorBatchQueueCapacity, obs: o})
+		return nil
+	}, builder.ProcessorBatchQueueCapacity)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorBatchQueueSizeCallback sets callback for observable ProcessorBatchQueueSize metric.
+func (builder *TelemetryBuilder) RegisterProcessorBatchQueueSizeCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorBatchQueueSize, obs: o})
+		return nil
+	}, builder.ProcessorBatchQueueSize)
 	if err != nil {
 		return err
 	}
@@ -131,10 +164,28 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		metric.WithUnit("{time}"),
 	)
 	errs = errors.Join(errs, err)
+	builder.ProcessorBatchBatcherFull, err = builder.meter.Int64Counter(
+		"otelcol_processor_batch_batcher_full",
+		metric.WithDescription("Number of consume calls that encountered a full selected batch shard channel [Development]"),
+		metric.WithUnit("{call}"),
+	)
+	errs = errors.Join(errs, err)
 	builder.ProcessorBatchMetadataCardinality, err = builder.meter.Int64ObservableUpDownCounter(
 		"otelcol_processor_batch_metadata_cardinality",
 		metric.WithDescription("Number of distinct metadata value combinations being processed [Development]"),
 		metric.WithUnit("{combination}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorBatchQueueCapacity, err = builder.meter.Int64ObservableUpDownCounter(
+		"otelcol_processor_batch_queue_capacity",
+		metric.WithDescription("Aggregate input-channel capacity across active batch shards [Development]"),
+		metric.WithUnit("{item}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorBatchQueueSize, err = builder.meter.Int64ObservableUpDownCounter(
+		"otelcol_processor_batch_queue_size",
+		metric.WithDescription("Aggregate number of items queued across active batch shards [Development]"),
+		metric.WithUnit("{item}"),
 	)
 	errs = errors.Join(errs, err)
 	builder.ProcessorBatchTimeoutTriggerSend, err = builder.meter.Int64Counter(
