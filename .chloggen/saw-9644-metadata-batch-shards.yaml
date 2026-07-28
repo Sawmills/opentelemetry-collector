@@ -1,5 +1,5 @@
 change_type: enhancement
 component: processor/batch
 note: Allow bounded batch sharding within each client metadata combination and expose queue saturation telemetry.
-issues: []
+issues: [14]
 change_logs: [user, api]
