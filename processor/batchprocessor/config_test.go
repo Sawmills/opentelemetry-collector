@@ -79,7 +79,7 @@ func TestValidateConfig_NumShardsWithMetadataKeys(t *testing.T) {
 		MetadataKeys: []string{"tenant"},
 		NumShards:    2,
 	}
-	assert.ErrorContains(t, cfg.Validate(), "cannot be combined")
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidateConfig_NumShardsBounded(t *testing.T) {

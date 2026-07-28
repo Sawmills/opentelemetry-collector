@@ -28,9 +28,18 @@ func TestSetupTelemetry(t *testing.T) {
 		observer.Observe(1)
 		return nil
 	}))
+	require.NoError(t, tb.RegisterProcessorBatchQueueCapacityCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(1)
+		return nil
+	}))
+	require.NoError(t, tb.RegisterProcessorBatchQueueSizeCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(1)
+		return nil
+	}))
 	tb.ProcessorBatchBatchSendSize.Record(context.Background(), 1)
 	tb.ProcessorBatchBatchSendSizeBytes.Record(context.Background(), 1)
 	tb.ProcessorBatchBatchSizeTriggerSend.Add(context.Background(), 1)
+	tb.ProcessorBatchBatcherFull.Add(context.Background(), 1)
 	tb.ProcessorBatchTimeoutTriggerSend.Add(context.Background(), 1)
 	AssertEqualProcessorBatchActiveShards(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
@@ -44,7 +53,16 @@ func TestSetupTelemetry(t *testing.T) {
 	AssertEqualProcessorBatchBatchSizeTriggerSend(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
+	AssertEqualProcessorBatchBatcherFull(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorBatchMetadataCardinality(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualProcessorBatchQueueCapacity(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualProcessorBatchQueueSize(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorBatchTimeoutTriggerSend(t, testTel,

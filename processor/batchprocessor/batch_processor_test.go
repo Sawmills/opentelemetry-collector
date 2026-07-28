@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -842,6 +843,23 @@ type blockingLogsSink struct {
 	release chan struct{}
 }
 
+type metadataLogsSink struct {
+	mu       sync.Mutex
+	byTenant map[string]int
+}
+
+func (s *metadataLogsSink) Capabilities() consumer.Capabilities {
+	return consumer.Capabilities{}
+}
+
+func (s *metadataLogsSink) ConsumeLogs(ctx context.Context, ld plog.Logs) error {
+	tenant := strings.Join(client.FromContext(ctx).Metadata.Get("tenant"), ",")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byTenant[tenant] += ld.LogRecordCount()
+	return nil
+}
+
 func (s *blockingLogsSink) Capabilities() consumer.Capabilities {
 	return consumer.Capabilities{MutatesData: false}
 }
@@ -854,7 +872,10 @@ func (s *blockingLogsSink) ConsumeLogs(_ context.Context, ld plog.Logs) error {
 			break
 		}
 	}
-	s.started <- struct{}{}
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
 	<-s.release
 	s.count.Add(int64(ld.LogRecordCount()))
 	s.active.Add(-1)
@@ -945,6 +966,249 @@ func TestFixedShardsRunDownstreamConcurrentlyAndDrain(t *testing.T) {
 	close(sink.release)
 	require.NoError(t, logs.Shutdown(context.Background()))
 	require.Equal(t, int64(numShards), sink.count.Load())
+}
+
+func TestMetadataShardsRunSameTenantDownstreamConcurrentlyAndDrain(t *testing.T) {
+	numShards := min(4, runtime.GOMAXPROCS(0))
+	if numShards < 2 {
+		t.Skip("test requires at least two available processors")
+	}
+
+	sink := &blockingLogsSink{
+		started: make(chan struct{}, numShards),
+		release: make(chan struct{}),
+	}
+	cfg := createDefaultConfig().(*Config)
+	cfg.Timeout = 0
+	cfg.SendBatchSize = 1
+	cfg.MetadataKeys = []string{"tenant"}
+	cfg.NumShards = uint32(numShards)
+
+	logs, err := NewFactory().CreateLogs(
+		context.Background(),
+		processortest.NewNopSettings(metadata.Type),
+		cfg,
+		sink,
+	)
+	require.NoError(t, err)
+	require.NoError(t, logs.Start(context.Background(), componenttest.NewNopHost()))
+
+	ctx := client.NewContext(context.Background(), client.Info{
+		Metadata: client.NewMetadata(map[string][]string{"tenant": {"nexxen"}}),
+	})
+	for range numShards {
+		require.NoError(t, logs.ConsumeLogs(ctx, testdata.GenerateLogs(1)))
+	}
+	for range numShards {
+		select {
+		case <-sink.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for all metadata batch shards")
+		}
+	}
+
+	processor := logs.(*logsBatchProcessor)
+	require.Equal(t, 1, processor.batcher.currentMetadataCardinality())
+	require.Equal(t, numShards, processor.batcher.currentShardCount())
+	require.Equal(t, int64(numShards), sink.max.Load())
+
+	close(sink.release)
+	require.NoError(t, logs.Shutdown(context.Background()))
+	require.Equal(t, int64(numShards), sink.count.Load())
+}
+
+func TestMetadataShardSetsPreserveTenantCardinalityAndCapacity(t *testing.T) {
+	const (
+		numShards     = 2
+		logsPerTenant = 8
+	)
+	if runtime.GOMAXPROCS(0) < numShards {
+		t.Skip("test requires at least two available processors")
+	}
+
+	sink := &metadataLogsSink{byTenant: map[string]int{}}
+	cfg := createDefaultConfig().(*Config)
+	cfg.Timeout = time.Minute
+	cfg.SendBatchSize = 100
+	cfg.MetadataKeys = []string{"tenant"}
+	cfg.MetadataCardinalityLimit = 2
+	cfg.NumShards = numShards
+
+	logs, err := NewFactory().CreateLogs(
+		context.Background(),
+		processortest.NewNopSettings(metadata.Type),
+		cfg,
+		sink,
+	)
+	require.NoError(t, err)
+	require.NoError(t, logs.Start(context.Background(), componenttest.NewNopHost()))
+
+	for _, tenant := range []string{"tenant-a", "tenant-b"} {
+		ctx := client.NewContext(context.Background(), client.Info{
+			Metadata: client.NewMetadata(map[string][]string{"tenant": {tenant}}),
+		})
+		for range logsPerTenant {
+			require.NoError(t, logs.ConsumeLogs(ctx, testdata.GenerateLogs(1)))
+		}
+	}
+
+	processor := logs.(*logsBatchProcessor)
+	batcher := processor.batcher.(*multiShardBatcher[plog.Logs])
+	require.Equal(t, 2, batcher.currentMetadataCardinality())
+	require.Equal(t, 4, batcher.currentShardCount())
+	batcher.batchers.Range(func(_, value any) bool {
+		set := value.(*shardSet[plog.Logs])
+		require.Len(t, set.shards, numShards)
+		totalCapacity := 0
+		for _, shard := range set.shards {
+			totalCapacity += cap(shard.newItem)
+		}
+		require.Equal(t, runtime.NumCPU(), totalCapacity)
+		return true
+	})
+
+	require.NoError(t, logs.Shutdown(context.Background()))
+	require.Equal(t, map[string]int{
+		"tenant-a": logsPerTenant,
+		"tenant-b": logsPerTenant,
+	}, sink.byTenant)
+}
+
+func TestMetadataShardQueueTelemetryWhileBlocked(t *testing.T) {
+	const numShards = 2
+	if runtime.GOMAXPROCS(0) < numShards {
+		t.Skip("test requires at least two available processors")
+	}
+
+	tel := componenttest.NewTelemetry()
+	sink := &blockingLogsSink{
+		started: make(chan struct{}, numShards),
+		release: make(chan struct{}),
+	}
+	cfg := createDefaultConfig().(*Config)
+	cfg.Timeout = 0
+	cfg.SendBatchSize = 1
+	cfg.MetadataKeys = []string{"tenant"}
+	cfg.NumShards = numShards
+	logs, err := NewFactory().CreateLogs(
+		context.Background(),
+		metadatatest.NewSettings(tel),
+		cfg,
+		sink,
+	)
+	require.NoError(t, err)
+	require.NoError(t, logs.Start(context.Background(), componenttest.NewNopHost()))
+	released := false
+	shutdown := false
+	telemetryShutdown := false
+	defer func() {
+		if !released {
+			close(sink.release)
+		}
+		if !shutdown {
+			_ = logs.Shutdown(context.Background())
+		}
+		if !telemetryShutdown {
+			_ = tel.Shutdown(context.Background())
+		}
+	}()
+
+	ctx := client.NewContext(context.Background(), client.Info{
+		Metadata: client.NewMetadata(map[string][]string{"tenant": {"tenant-a"}}),
+	})
+	for range numShards {
+		require.NoError(t, logs.ConsumeLogs(ctx, testdata.GenerateLogs(1)))
+	}
+	for range numShards {
+		select {
+		case <-sink.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for both metadata workers")
+		}
+	}
+	for range runtime.NumCPU() {
+		require.NoError(t, logs.ConsumeLogs(ctx, testdata.GenerateLogs(1)))
+	}
+
+	blockedConsume := make(chan error, 1)
+	go func() {
+		blockedConsume <- logs.ConsumeLogs(ctx, testdata.GenerateLogs(1))
+	}()
+
+	attrs := attribute.NewSet(attribute.String("processor", "batch"))
+	require.Eventually(t, func() bool {
+		metric, metricErr := tel.GetMetric("otelcol_processor_batch_batcher_full")
+		if metricErr != nil {
+			return false
+		}
+		sum, ok := metric.Data.(metricdata.Sum[int64])
+		return ok && len(sum.DataPoints) == 1 && sum.DataPoints[0].Value == 1
+	}, time.Second, 10*time.Millisecond)
+	metadatatest.AssertEqualProcessorBatchQueueSize(t, tel, []metricdata.DataPoint[int64]{
+		{Attributes: attrs, Value: int64(runtime.NumCPU())},
+	}, metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualProcessorBatchQueueCapacity(t, tel, []metricdata.DataPoint[int64]{
+		{Attributes: attrs, Value: int64(runtime.NumCPU())},
+	}, metricdatatest.IgnoreTimestamp())
+
+	close(sink.release)
+	released = true
+	require.NoError(t, <-blockedConsume)
+	require.NoError(t, logs.Shutdown(context.Background()))
+	shutdown = true
+	metadatatest.AssertEqualProcessorBatchQueueSize(t, tel, []metricdata.DataPoint[int64]{
+		{Attributes: attrs, Value: 0},
+	}, metricdatatest.IgnoreTimestamp())
+	require.NoError(t, tel.Shutdown(context.Background()))
+	telemetryShutdown = true
+}
+
+func TestMetadataShardSetCreatedOnceUnderConcurrentConsume(t *testing.T) {
+	const (
+		numShards    = 2
+		requestCount = 100
+	)
+	if runtime.GOMAXPROCS(0) < numShards {
+		t.Skip("test requires at least two available processors")
+	}
+
+	sink := &metadataLogsSink{byTenant: map[string]int{}}
+	cfg := createDefaultConfig().(*Config)
+	cfg.Timeout = time.Minute
+	cfg.SendBatchSize = 1000
+	cfg.MetadataKeys = []string{"tenant"}
+	cfg.NumShards = numShards
+
+	logs, err := NewFactory().CreateLogs(
+		context.Background(),
+		processortest.NewNopSettings(metadata.Type),
+		cfg,
+		sink,
+	)
+	require.NoError(t, err)
+	require.NoError(t, logs.Start(context.Background(), componenttest.NewNopHost()))
+
+	ctx := client.NewContext(context.Background(), client.Info{
+		Metadata: client.NewMetadata(map[string][]string{"tenant": {"tenant-a"}}),
+	})
+	var wg sync.WaitGroup
+	errs := make(chan error, requestCount)
+	for range requestCount {
+		wg.Go(func() {
+			errs <- logs.ConsumeLogs(ctx, testdata.GenerateLogs(1))
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	processor := logs.(*logsBatchProcessor)
+	require.Equal(t, 1, processor.batcher.currentMetadataCardinality())
+	require.Equal(t, numShards, processor.batcher.currentShardCount())
+	require.NoError(t, logs.Shutdown(context.Background()))
+	require.Equal(t, requestCount, sink.byTenant["tenant-a"])
 }
 
 func TestFixedShardsConcurrentConsume(t *testing.T) {
