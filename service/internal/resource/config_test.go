@@ -84,7 +84,7 @@ func TestNew(t *testing.T) {
 			res := New(buildInfo, tt.resourceCfg)
 			got := make(map[string]string)
 			for _, attr := range res.Attributes() {
-				got[string(attr.Key)] = attr.Value.Emit()
+				got[string(attr.Key)] = attr.Value.String()
 			}
 
 			if tt.want["service.instance.id"] == randomUUIDSpecialValue {

@@ -233,12 +233,21 @@ func (b *shard[T]) start() {
 	b.processor.goroutines.Go(b.startLoop)
 }
 
-func (b *shard[T]) enqueue(data T) {
+func (b *shard[T]) enqueue(ctx context.Context, data T) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case b.newItem <- data:
+		return nil
 	default:
 		b.processor.telemetry.recordBatcherFull()
-		b.newItem <- data
+	}
+	select {
+	case b.newItem <- data:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -343,9 +352,8 @@ func (sb *singleShardBatcher[T]) start(context.Context) error {
 	return nil
 }
 
-func (sb *singleShardBatcher[T]) consume(_ context.Context, data T) error {
-	sb.single.enqueue(data)
-	return nil
+func (sb *singleShardBatcher[T]) consume(ctx context.Context, data T) error {
+	return sb.single.enqueue(ctx, data)
 }
 
 func (sb *singleShardBatcher[T]) currentMetadataCardinality() int {
@@ -376,10 +384,10 @@ func (ss *shardSet[T]) start() {
 	}
 }
 
-func (ss *shardSet[T]) consume(data T) {
+func (ss *shardSet[T]) consume(ctx context.Context, data T) error {
 	index := ss.next.Add(1) - 1
 	selected := ss.shards[index%uint64(len(ss.shards))]
-	selected.enqueue(data)
+	return selected.enqueue(ctx, data)
 }
 
 func (ss *shardSet[T]) currentQueueSize() int {
@@ -408,9 +416,8 @@ func (fb *fixedShardBatcher[T]) start(context.Context) error {
 	return nil
 }
 
-func (fb *fixedShardBatcher[T]) consume(_ context.Context, data T) error {
-	fb.set.consume(data)
-	return nil
+func (fb *fixedShardBatcher[T]) consume(ctx context.Context, data T) error {
+	return fb.set.consume(ctx, data)
 }
 
 func (fb *fixedShardBatcher[T]) currentMetadataCardinality() int {
@@ -455,6 +462,9 @@ func (mb *multiShardBatcher[T]) start(context.Context) error {
 }
 
 func (mb *multiShardBatcher[T]) consume(ctx context.Context, data T) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Get each metadata key value, form the corresponding
 	// attribute set for use as a map lookup key.
 	info := client.FromContext(ctx)
@@ -475,28 +485,32 @@ func (mb *multiShardBatcher[T]) consume(ctx context.Context, data T) error {
 	b, ok := mb.batchers.Load(aset)
 	if !ok {
 		mb.lock.Lock()
-		if mb.metadataLimit != 0 && mb.size >= mb.metadataLimit {
-			mb.lock.Unlock()
-			return errTooManyBatchers
-		}
-
-		// aset.ToSlice() returns the sorted, deduplicated,
-		// and name-lowercased list of attributes.
-		var loaded bool
-		md := make(map[string][]string, len(mb.metadataKeys))
-		for _, k := range mb.metadataKeys {
-			md[k] = info.Metadata.Get(k)
-		}
-		b, loaded = mb.batchers.LoadOrStore(aset, mb.processor.newShardSet(md, mb.numShards))
-		if !loaded {
-			// Start the goroutines only if we added the set to the map.
-			b.(*shardSet[T]).start()
+		b, ok = mb.batchers.Load(aset)
+		if !ok {
+			if mb.metadataLimit != 0 && mb.size >= mb.metadataLimit {
+				mb.lock.Unlock()
+				return errTooManyBatchers
+			}
+			md := make(map[string][]string, len(mb.metadataKeys))
+			for _, k := range mb.metadataKeys {
+				md[k] = info.Metadata.Get(k)
+			}
+			set := mb.processor.newShardSet(md, mb.numShards)
+			// The first shard has at least one buffer slot, so its first enqueue
+			// cannot block. Publish only after admission succeeds.
+			if err := set.consume(ctx, data); err != nil {
+				mb.lock.Unlock()
+				return err
+			}
+			mb.batchers.Store(aset, set)
+			set.start()
 			mb.size++
+			mb.lock.Unlock()
+			return nil
 		}
 		mb.lock.Unlock()
 	}
-	b.(*shardSet[T]).consume(data)
-	return nil
+	return b.(*shardSet[T]).consume(ctx, data)
 }
 
 func (mb *multiShardBatcher[T]) currentMetadataCardinality() int {
@@ -542,7 +556,11 @@ func newTracesBatchProcessor(set processor.Settings, next consumer.Traces, cfg *
 
 func (t *tracesBatchProcessor) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
 	pref.RefTraces(td)
-	return t.batcher.consume(ctx, td)
+	if err := t.batcher.consume(ctx, td); err != nil {
+		pref.UnrefTraces(td)
+		return err
+	}
+	return nil
 }
 
 type metricsBatchProcessor struct {
@@ -561,7 +579,11 @@ func newMetricsBatchProcessor(set processor.Settings, next consumer.Metrics, cfg
 // ConsumeMetrics implements processor.Metrics
 func (m *metricsBatchProcessor) ConsumeMetrics(ctx context.Context, md pmetric.Metrics) error {
 	pref.RefMetrics(md)
-	return m.batcher.consume(ctx, md)
+	if err := m.batcher.consume(ctx, md); err != nil {
+		pref.UnrefMetrics(md)
+		return err
+	}
+	return nil
 }
 
 type logsBatchProcessor struct {
@@ -580,7 +602,11 @@ func newLogsBatchProcessor(set processor.Settings, next consumer.Logs, cfg *Conf
 // ConsumeLogs implements processor.Logs
 func (l *logsBatchProcessor) ConsumeLogs(ctx context.Context, ld plog.Logs) error {
 	pref.RefLogs(ld)
-	return l.batcher.consume(ctx, ld)
+	if err := l.batcher.consume(ctx, ld); err != nil {
+		pref.UnrefLogs(ld)
+		return err
+	}
+	return nil
 }
 
 type batchTraces struct {

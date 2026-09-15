@@ -17,6 +17,13 @@ batches. Batching helps better compress the data and reduce the number of
 outgoing connections required to transmit the data. This processor supports
 both size and time based batching.
 
+When the input queue is full, the processor waits for space or request cancellation.
+If cancellation stops the wait, the processor returns the context error and leaves
+the input unchanged for a retry. It also rejects requests whose context is already
+canceled. Data accepted into the queue continues processing independently of the
+request context. Cancellation can race with admission, so a client timeout does
+not guarantee that the request was rejected or prevent every possible duplicate.
+
 The batch processor should be defined in the pipeline after the `memory_limiter`
 as well as any sampling processors. This is because batching should happen after
 any data drops such as sampling.
