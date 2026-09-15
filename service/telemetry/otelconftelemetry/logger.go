@@ -67,7 +67,7 @@ func createLogger(
 		logger = logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 			var fields []zap.Field
 			for _, attr := range res.Attributes() {
-				fields = append(fields, zap.String(string(attr.Key), attr.Value.Emit()))
+				fields = append(fields, zap.String(string(attr.Key), attr.Value.Emit())) //nolint:staticcheck // Preserve resource log formatting; String changes boolean slices and special floats.
 			}
 
 			r := zap.Dict("resource", fields...)
