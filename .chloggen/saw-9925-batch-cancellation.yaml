@@ -1,0 +1,6 @@
+change_type: bug_fix
+component: processor/batch
+note: Honor request cancellation while waiting for space in the batch input queue.
+# Add this change's GitHub PR number when the PR is opened.
+issues: []
+change_logs: [user]
