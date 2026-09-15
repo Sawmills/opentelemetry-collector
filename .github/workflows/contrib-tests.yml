@@ -26,7 +26,9 @@ jobs:
       - name: Prepare Contrib Tests
         run: |
           contrib_path=/tmp/opentelemetry-collector-contrib
-          git clone --depth=1 https://github.com/open-telemetry/opentelemetry-collector-contrib.git $contrib_path
+          # Match this fork's core release and metadata schema.
+          git clone --depth=1 --branch v0.149.0 https://github.com/open-telemetry/opentelemetry-collector-contrib.git $contrib_path
+          test "$(git -C "$contrib_path" rev-parse HEAD)" = 262df712c2a3f8d240b041a73109e8ab3904b916
           make CONTRIB_PATH=$contrib_path prepare-contrib
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
