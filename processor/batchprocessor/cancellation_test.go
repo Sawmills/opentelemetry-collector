@@ -5,6 +5,7 @@ package batchprocessor
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
 	"testing"
@@ -18,6 +19,8 @@ import (
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumererror"
 	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/featuregate"
+	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/testdata"
 	"go.opentelemetry.io/collector/pdata/xpdata/pref"
 	"go.opentelemetry.io/collector/processor/batchprocessor/internal/metadata"
@@ -26,6 +29,15 @@ import (
 )
 
 func TestCanceledAdmissionPreservesInputAndReleasesReference(t *testing.T) {
+	registry := featuregate.GlobalRegistry()
+	var wasEnabled bool
+	registry.VisitAll(func(gate *featuregate.Gate) {
+		if gate.ID() == "pdata.enableRefCounting" {
+			wasEnabled = gate.IsEnabled()
+		}
+	})
+	require.NoError(t, registry.Set("pdata.enableRefCounting", true))
+	t.Cleanup(func() { assert.NoError(t, registry.Set("pdata.enableRefCounting", wasEnabled)) })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cfg := createDefaultConfig().(*Config)
@@ -62,6 +74,55 @@ func TestCanceledAdmissionPreservesInputAndReleasesReference(t *testing.T) {
 		pref.UnrefTraces(data)
 		assert.PanicsWithValue(t, "Cannot unref freed data", func() { pref.UnrefTraces(data) })
 	})
+}
+
+func TestCanceledFirstAdmissionDoesNotReserveMetadata(t *testing.T) {
+	for _, numShards := range []uint32{1, 2} {
+		t.Run(fmt.Sprintf("shards_%d", numShards), func(t *testing.T) {
+			if int(numShards) > runtime.GOMAXPROCS(0) {
+				t.Skip("test requires at least two available processors")
+			}
+			cfg := createDefaultConfig().(*Config)
+			cfg.MetadataKeys = []string{"tenant"}
+			cfg.MetadataCardinalityLimit = 1
+			cfg.NumShards = numShards
+			sink := new(consumertest.LogsSink)
+			p, err := newLogsBatchProcessor(processortest.NewNopSettings(metadata.Type), sink, cfg)
+			require.NoError(t, err)
+			require.NoError(t, p.Start(context.Background(), componenttest.NewNopHost()))
+			shutdown := sync.OnceFunc(func() { assert.NoError(t, p.Shutdown(context.Background())) })
+			t.Cleanup(shutdown)
+			bp := p.(*logsBatchProcessor)
+			mb := bp.batcher.(*multiShardBatcher[plog.Logs])
+			newBatch := bp.batchFunc
+			for i := range 5 {
+				ctx := client.NewContext(context.Background(), client.Info{
+					Metadata: client.NewMetadata(map[string][]string{"tenant": {fmt.Sprintf("canceled-%d", i)}}),
+				})
+				ctx, cancel := context.WithCancel(ctx)
+				bp.batchFunc = func() batch[plog.Logs] {
+					cancel()
+					return newBatch()
+				}
+				data := testdata.GenerateLogs(1)
+				err = p.ConsumeLogs(ctx, data)
+				cancel()
+				require.ErrorIs(t, err, context.Canceled)
+				require.Equal(t, 1, data.LogRecordCount())
+				require.Zero(t, mb.currentMetadataCardinality())
+				require.Zero(t, mb.currentShardCount())
+				mb.batchers.Range(func(_, _ any) bool {
+					t.Error("canceled first admission left a metadata shard registered")
+					return true
+				})
+			}
+			bp.batchFunc = newBatch
+			require.NoError(t, p.ConsumeLogs(context.Background(), testdata.GenerateLogs(1)))
+			require.Equal(t, 1, mb.currentMetadataCardinality())
+			shutdown()
+			require.Equal(t, 1, sink.LogRecordCount())
+		})
+	}
 }
 
 func TestCanceledAdmissionUnderBurst(t *testing.T) {

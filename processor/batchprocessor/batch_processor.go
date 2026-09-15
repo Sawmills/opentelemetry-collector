@@ -485,23 +485,28 @@ func (mb *multiShardBatcher[T]) consume(ctx context.Context, data T) error {
 	b, ok := mb.batchers.Load(aset)
 	if !ok {
 		mb.lock.Lock()
-		if mb.metadataLimit != 0 && mb.size >= mb.metadataLimit {
-			mb.lock.Unlock()
-			return errTooManyBatchers
-		}
-
-		// aset.ToSlice() returns the sorted, deduplicated,
-		// and name-lowercased list of attributes.
-		var loaded bool
-		md := make(map[string][]string, len(mb.metadataKeys))
-		for _, k := range mb.metadataKeys {
-			md[k] = info.Metadata.Get(k)
-		}
-		b, loaded = mb.batchers.LoadOrStore(aset, mb.processor.newShardSet(md, mb.numShards))
-		if !loaded {
-			// Start the goroutines only if we added the set to the map.
-			b.(*shardSet[T]).start()
+		b, ok = mb.batchers.Load(aset)
+		if !ok {
+			if mb.metadataLimit != 0 && mb.size >= mb.metadataLimit {
+				mb.lock.Unlock()
+				return errTooManyBatchers
+			}
+			md := make(map[string][]string, len(mb.metadataKeys))
+			for _, k := range mb.metadataKeys {
+				md[k] = info.Metadata.Get(k)
+			}
+			set := mb.processor.newShardSet(md, mb.numShards)
+			// The first shard has at least one buffer slot, so its first enqueue
+			// cannot block. Publish only after admission succeeds.
+			if err := set.consume(ctx, data); err != nil {
+				mb.lock.Unlock()
+				return err
+			}
+			mb.batchers.Store(aset, set)
+			set.start()
 			mb.size++
+			mb.lock.Unlock()
+			return nil
 		}
 		mb.lock.Unlock()
 	}

@@ -1177,6 +1177,7 @@ func TestMetadataShardSetCreatedOnceUnderConcurrentConsume(t *testing.T) {
 	cfg.Timeout = time.Minute
 	cfg.SendBatchSize = 1000
 	cfg.MetadataKeys = []string{"tenant"}
+	cfg.MetadataCardinalityLimit = 1
 	cfg.NumShards = numShards
 
 	logs, err := NewFactory().CreateLogs(
