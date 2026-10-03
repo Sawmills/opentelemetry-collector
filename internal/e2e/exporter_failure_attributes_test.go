@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func TestExporterFailureAttributesDetailed(t *testing.T) {
 		}, 5*time.Second, 200*time.Millisecond, "expected permanent failure metric")
 	})
 
-	t.Run("transient error that recovers has no failure metric", func(t *testing.T) {
+	t.Run("transient error that recovers records zero failed items", func(t *testing.T) {
 		var attempts atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/metrics" {
@@ -74,7 +75,17 @@ func TestExporterFailureAttributesDetailed(t *testing.T) {
 		otelPort, metricsPort := startFailureAttributeCollector(t, server.URL)
 
 		require.NoError(t, sendTestMetrics(otelPort))
-		assertNoFailureMetric(t, metricsPort, "otlp_http/test")
+		require.Eventually(t, func() bool {
+			return len(scrapeFailureMetrics(t, metricsPort, "otlp_http/test")) > 0
+		}, 5*time.Second, 200*time.Millisecond, "expected observed failure-counter coverage after recovery")
+		require.Equal(t, int32(2), attempts.Load(), "the transient failure must be retried successfully")
+		metrics := scrapeFailureMetrics(t, metricsPort, "otlp_http/test")
+		require.Len(t, metrics, 1, "recovery must not record a separate positive failure series")
+		require.NotNil(t, metrics[0].Counter)
+		require.Zero(t, metrics[0].Counter.GetValue())
+		for _, label := range metrics[0].Label {
+			require.False(t, strings.HasPrefix(label.GetName(), "error_"), "successful outcomes must not have error attributes")
+		}
 	})
 
 	t.Run("retryable error exhausts retries", func(t *testing.T) {
@@ -158,6 +169,15 @@ func startFailureAttributeCollector(t *testing.T, exporterEndpoint string) (stri
 
 func scrapeFailureMetric(t *testing.T, metricsPort, exporterName string) *dto.Metric {
 	t.Helper()
+	metrics := scrapeFailureMetrics(t, metricsPort, exporterName)
+	if len(metrics) == 0 {
+		return nil
+	}
+	return metrics[0]
+}
+
+func scrapeFailureMetrics(t *testing.T, metricsPort, exporterName string) []*dto.Metric {
+	t.Helper()
 	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/metrics", metricsPort))
 	if err != nil {
 		return nil
@@ -181,13 +201,14 @@ func scrapeFailureMetric(t *testing.T, metricsPort, exporterName string) *dto.Me
 		return nil
 	}
 
+	var metrics []*dto.Metric
 	for _, metric := range metricFamily.Metric {
 		if hasLabel(metric, "exporter", exporterName) {
-			return metric
+			metrics = append(metrics, metric)
 		}
 	}
 
-	return nil
+	return metrics
 }
 
 func hasLabel(metric *dto.Metric, name, expected string) bool {
@@ -206,16 +227,4 @@ func labelValue(metric *dto.Metric, labelName string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func assertNoFailureMetric(t *testing.T, metricsPort, exporterName string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if metric := scrapeFailureMetric(t, metricsPort, exporterName); metric != nil {
-			failurePermanent, _ := labelValue(metric, "error_permanent")
-			t.Fatalf("unexpected failure metric recorded, error_permanent=%s", failurePermanent)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,6 +31,7 @@ type fakeQueue[T any] struct {
 	offerErr error
 	size     int64
 	capacity int64
+	oldest   time.Time
 }
 
 func (fq *fakeQueue[T]) Size() int64 {
@@ -42,6 +44,10 @@ func (fq *fakeQueue[T]) Capacity() int64 {
 
 func (fq *fakeQueue[T]) Offer(context.Context, T) error {
 	return fq.offerErr
+}
+
+func (fq *fakeQueue[T]) OldestTimestamp() time.Time {
+	return fq.oldest
 }
 
 func newFakeQueue[T request.Request](offerErr error, size, capacity int64) Queue[T] {
@@ -271,13 +277,28 @@ func TestObsQueueLogsBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalLogs.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 				Min:          metricdata.NewExtrema[int64](2),
 				Max:          metricdata.NewExtrema[int64](2),
 				Sum:          2,
+			},
+		}, metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualExporterQueueBatchSendSizeBytes(t, tt,
+		[]metricdata.HistogramDataPoint[int64]{
+			{
+				Attributes: attribute.NewSet(
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalLogs.String())),
+				Count:        1,
+				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000},
+				BucketCounts: []uint64{0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				Min:          metricdata.NewExtrema[int64](100),
+				Max:          metricdata.NewExtrema[int64](100),
+				Sum:          100,
 			},
 		}, metricdatatest.IgnoreTimestamp())
 }
@@ -297,7 +318,8 @@ func TestObsQueueTracesBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalTraces.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -323,7 +345,8 @@ func TestObsQueueMetricsBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, pipeline.SignalMetrics.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -349,7 +372,8 @@ func TestObsQueueProfilesBatchSize(t *testing.T) {
 		[]metricdata.HistogramDataPoint[int64]{
 			{
 				Attributes: attribute.NewSet(
-					attribute.String(exporterKey, exporterID.String())),
+					attribute.String(exporterKey, exporterID.String()),
+					attribute.String(dataTypeKey, xpipeline.SignalProfiles.String())),
 				Count:        1,
 				Bounds:       []float64{10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000, 30000, 50000, 100000},
 				BucketCounts: []uint64{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -358,4 +382,30 @@ func TestObsQueueProfilesBatchSize(t *testing.T) {
 				Sum:          22,
 			},
 		}, metricdatatest.IgnoreTimestamp())
+}
+
+func TestObsQueueLogsOldestBatchAge(t *testing.T) {
+	tt := componenttest.NewTelemetry()
+	t.Cleanup(func() { require.NoError(t, tt.Shutdown(context.Background())) })
+
+	queue := &fakeQueue[request.Request]{
+		size:     7,
+		capacity: 9,
+		oldest:   time.Now().Add(-25 * time.Millisecond),
+	}
+
+	te, err := newObsQueue[request.Request](Settings[request.Request]{
+		Signal:    pipeline.SignalLogs,
+		ID:        exporterID,
+		Telemetry: tt.NewTelemetrySettings(),
+	}, queue)
+	require.NoError(t, err)
+
+	require.NoError(t, te.Offer(context.Background(), &requesttest.FakeRequest{Items: 2, Bytes: 100}))
+	metric, err := tt.GetMetric("otelcol_exporter_queue_oldest_batch_age")
+	require.NoError(t, err)
+	gauge, ok := metric.Data.(metricdata.Gauge[int64])
+	require.True(t, ok)
+	require.Len(t, gauge.DataPoints, 1)
+	require.Positive(t, gauge.DataPoints[0].Value)
 }

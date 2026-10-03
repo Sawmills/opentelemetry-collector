@@ -6,4 +6,6 @@ subtext: |
   Idle exporters and empty exports do not create failure points. Positive failure
   counts retain their error attributes. The additional zero point has only the
   exporter attribute and does not change the aggregate failure count.
+  Preserve the queue-age metrics and persisted enqueue timestamps from the
+  bundled v0.149.0-sawmills.3 helper when publishing from current main.
 change_logs: [user]

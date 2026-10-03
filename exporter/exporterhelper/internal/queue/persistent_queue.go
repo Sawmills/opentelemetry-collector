@@ -4,12 +4,14 @@
 package queue // import "go.opentelemetry.io/collector/exporter/exporterhelper/internal/queue"
 
 import (
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -32,6 +34,11 @@ const (
 
 	// metadataKey is the new single key for all queue metadata.
 	metadataKey = "qmv0"
+
+	queueItemLegacyMagic      = "qts1"
+	queueItemTimestampMagic   = "otelqts1"
+	queueItemLegacyHeaderSize = len(queueItemLegacyMagic) + 8
+	queueItemHeaderSize       = len(queueItemTimestampMagic) + 8
 )
 
 var (
@@ -91,6 +98,40 @@ type persistentQueue[T request.Request] struct {
 	stopped         bool
 
 	blockOnOverflow bool
+	enqueueTimes    map[uint64]time.Time
+	enqueueHeap     queueOldestHeap
+	oldestEnqueued  time.Time
+}
+
+type queueOldestEntry struct {
+	index      uint64
+	enqueuedAt time.Time
+}
+
+type queueOldestHeap []queueOldestEntry
+
+func (h queueOldestHeap) Len() int {
+	return len(h)
+}
+
+func (h queueOldestHeap) Less(i, j int) bool {
+	return h[i].enqueuedAt.Before(h[j].enqueuedAt)
+}
+
+func (h queueOldestHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *queueOldestHeap) Push(x any) {
+	*h = append(*h, x.(queueOldestEntry))
+}
+
+func (h *queueOldestHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 // newPersistentQueue creates a new queue backed by file storage; name and signal must be a unique combination that identifies the queue storage
@@ -107,6 +148,7 @@ func newPersistentQueue[T request.Request](set Settings[T]) readableQueue[T] {
 		id:              set.ID,
 		signal:          set.Signal,
 		blockOnOverflow: set.BlockOnOverflow,
+		enqueueTimes:    make(map[uint64]time.Time),
 	}
 	pq.hasMoreElements = sync.NewCond(&pq.mu)
 	pq.hasMoreSpace = newCond(&pq.mu)
@@ -148,6 +190,12 @@ func (pq *persistentQueue[T]) Capacity() int64 {
 	return pq.capacity
 }
 
+func (pq *persistentQueue[T]) OldestTimestamp() time.Time {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	return pq.oldestEnqueued
+}
+
 func (pq *persistentQueue[T]) initClient(ctx context.Context, client storage.Client) {
 	pq.client = client
 	// Start with a reference 1 which is the reference we use for the producer goroutines and initialization.
@@ -166,6 +214,8 @@ func (pq *persistentQueue[T]) initClient(ctx context.Context, client storage.Cli
 		pq.logger.Info("New queue metadata key not found, attempting to load legacy format.")
 		pq.loadLegacyMetadata(ctx)
 	}
+
+	pq.rebuildEnqueueTimes(ctx)
 }
 
 // loadQueueMetadata loads queue metadata from the consolidated key
@@ -286,11 +336,12 @@ func (pq *persistentQueue[T]) Offer(ctx context.Context, req T) error {
 	pq.metadata.ItemsSize += pq.itemsSizer.Sizeof(req)
 	pq.metadata.BytesSize += pq.bytesSizer.Sizeof(req)
 
-	return pq.putInternal(ctx, req)
+	return pq.putInternal(ctx, req, time.Now())
 }
 
 // putInternal adds the request to the storage without updating items/bytes sizes.
-func (pq *persistentQueue[T]) putInternal(ctx context.Context, req T) error {
+func (pq *persistentQueue[T]) putInternal(ctx context.Context, req T, enqueuedAt time.Time) error {
+	index := pq.metadata.WriteIndex
 	pq.metadata.WriteIndex++
 
 	metadataBuf, err := proto.Marshal(&pq.metadata)
@@ -302,10 +353,11 @@ func (pq *persistentQueue[T]) putInternal(ctx context.Context, req T) error {
 	if err != nil {
 		return err
 	}
+	reqBuf = marshalQueuedItem(reqBuf, enqueuedAt)
 	// Carry out a transaction where we both add the item and update the write index
 	ops := []*storage.Operation{
 		storage.SetOperation(metadataKey, metadataBuf),
-		storage.SetOperation(getItemKey(pq.metadata.WriteIndex-1), reqBuf),
+		storage.SetOperation(getItemKey(index), reqBuf),
 	}
 	if err := pq.client.Batch(ctx, ops...); err != nil {
 		// At this moment, metadata may be updated in the storage, so we cannot just revert changes to the
@@ -313,24 +365,30 @@ func (pq *persistentQueue[T]) putInternal(ctx context.Context, req T) error {
 		return err
 	}
 
+	pq.enqueueTimes[index] = enqueuedAt
+	if !enqueuedAt.IsZero() {
+		heap.Push(&pq.enqueueHeap, queueOldestEntry{index: index, enqueuedAt: enqueuedAt})
+	}
+	pq.syncOldestEnqueuedLocked()
+
 	pq.hasMoreElements.Signal()
 
 	return nil
 }
 
-func (pq *persistentQueue[T]) Read(ctx context.Context) (context.Context, T, Done, bool) {
+func (pq *persistentQueue[T]) Read(ctx context.Context) (context.Context, T, time.Time, Done, bool) {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
 	for {
 		if pq.stopped {
 			var req T
-			return context.Background(), req, nil, false
+			return context.Background(), req, time.Time{}, nil, false
 		}
 
 		// Read until either a successful retrieved element or no more elements in the storage.
 		for pq.metadata.ReadIndex != pq.metadata.WriteIndex {
-			index, req, reqCtx, consumed := pq.getNextItem(ctx)
+			index, req, reqCtx, enqueuedAt, consumed := pq.getNextItem(ctx)
 			// Ensure the used size are in sync when queue is drained.
 			if pq.requestSize() == 0 {
 				pq.metadata.BytesSize = 0
@@ -339,7 +397,7 @@ func (pq *persistentQueue[T]) Read(ctx context.Context) (context.Context, T, Don
 			if consumed {
 				id := indexDonePool.Get().(*indexDone)
 				id.reset(index, pq.itemsSizer.Sizeof(req), pq.bytesSizer.Sizeof(req), pq)
-				return reqCtx, req, id, true
+				return reqCtx, req, enqueuedAt, id, true
 			}
 			// More space available, data was dropped.
 			pq.hasMoreSpace.Signal()
@@ -354,7 +412,7 @@ func (pq *persistentQueue[T]) Read(ctx context.Context) (context.Context, T, Don
 // getNextItem pulls the next available item from the persistent storage along with its index. Once processing is
 // finished, the index should be called with onDone to clean up the storage. If no new item is available,
 // returns false.
-func (pq *persistentQueue[T]) getNextItem(ctx context.Context) (uint64, T, context.Context, bool) {
+func (pq *persistentQueue[T]) getNextItem(ctx context.Context) (uint64, T, context.Context, time.Time, bool) {
 	index := pq.metadata.ReadIndex
 	// Increase here, so even if errors happen below, it always iterates
 	pq.metadata.ReadIndex++
@@ -362,15 +420,18 @@ func (pq *persistentQueue[T]) getNextItem(ctx context.Context) (uint64, T, conte
 
 	var req T
 	restoredCtx := context.Background()
+	enqueuedAt := time.Time{}
 	metadataBytes, err := proto.Marshal(&pq.metadata)
 	if err != nil {
-		return 0, req, restoredCtx, false
+		return 0, req, restoredCtx, enqueuedAt, false
 	}
 
 	getOp := storage.GetOperation(getItemKey(index))
 	err = pq.client.Batch(ctx, storage.SetOperation(metadataKey, metadataBytes), getOp)
 	if err == nil {
-		restoredCtx, req, err = pq.encoding.Unmarshal(getOp.Value)
+		payload, restoredEnqueuedAt := unmarshalQueuedItem(getOp.Value)
+		enqueuedAt = restoredEnqueuedAt
+		restoredCtx, req, err = pq.encoding.Unmarshal(payload)
 	}
 
 	if err != nil {
@@ -380,14 +441,14 @@ func (pq *persistentQueue[T]) getNextItem(ctx context.Context) (uint64, T, conte
 			pq.logger.Error("Error deleting item from queue", zap.Error(err))
 		}
 
-		return 0, req, restoredCtx, false
+		return 0, req, restoredCtx, enqueuedAt, false
 	}
 
 	// Increase the reference count, so the client is not closed while the request is being processed.
 	// The client cannot be closed because we hold the lock since last we checked `stopped`.
 	pq.refClient++
 
-	return index, req, restoredCtx, true
+	return index, req, restoredCtx, enqueuedAt, true
 }
 
 // onDone should be called to remove the item of the given index from the queue once processing is finished.
@@ -478,13 +539,14 @@ func (pq *persistentQueue[T]) enqueueNotDispatchedReqs(ctx context.Context, disp
 			pq.logger.Warn("Failed retrieving item", zap.String(zapKey, op.Key), zap.Error(errValueNotSet))
 			continue
 		}
-		reqCtx, req, err := pq.encoding.Unmarshal(op.Value)
+		payload, enqueuedAt := unmarshalQueuedItem(op.Value)
+		reqCtx, req, err := pq.encoding.Unmarshal(payload)
 		// If error happened or item is nil, it will be efficiently ignored
 		if err != nil {
 			pq.logger.Warn("Failed unmarshalling item", zap.String(zapKey, op.Key), zap.Error(err))
 			continue
 		}
-		if pq.putInternal(reqCtx, req) != nil { //nolint:contextcheck
+		if pq.putInternal(reqCtx, req, enqueuedAt) != nil { //nolint:contextcheck
 			errCount++
 		}
 	}
@@ -524,6 +586,7 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 	deleteOp := storage.DeleteOperation(getItemKey(index))
 	err = pq.client.Batch(ctx, setOp, deleteOp)
 	if err == nil {
+		pq.removeEnqueueTimeLocked(index)
 		// Everything ok, exit
 		return nil
 	}
@@ -536,6 +599,8 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 		// Return an error here, as this indicates an issue with the underlying storage medium
 		return fmt.Errorf("failed deleting item from queue, got error from storage: %w", err)
 	}
+
+	pq.removeEnqueueTimeLocked(index)
 
 	if err = pq.client.Batch(ctx, setOp); err != nil {
 		// even if this fails, we still have the right dispatched items in memory
@@ -560,8 +625,115 @@ func toStorageClient(ctx context.Context, storageID component.ID, host component
 	return storageExt.GetClient(ctx, component.KindExporter, ownerID, signal.String())
 }
 
+func (pq *persistentQueue[T]) rebuildEnqueueTimes(ctx context.Context) {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	pq.enqueueTimes = make(map[uint64]time.Time)
+	pq.enqueueHeap = nil
+	pq.oldestEnqueued = time.Time{}
+
+	indices := make(map[uint64]struct{}, pq.metadata.WriteIndex-pq.metadata.ReadIndex+uint64(len(pq.metadata.CurrentlyDispatchedItems)))
+	for index := pq.metadata.ReadIndex; index < pq.metadata.WriteIndex; index++ {
+		indices[index] = struct{}{}
+	}
+	for _, index := range pq.metadata.CurrentlyDispatchedItems {
+		indices[index] = struct{}{}
+	}
+
+	for index := range indices {
+		payload, err := pq.client.Get(ctx, getItemKey(index))
+		if err != nil {
+			continue
+		}
+		_, enqueuedAt := unmarshalQueuedItem(payload)
+		if enqueuedAt.IsZero() {
+			continue
+		}
+		pq.enqueueTimes[index] = enqueuedAt
+		heap.Push(&pq.enqueueHeap, queueOldestEntry{index: index, enqueuedAt: enqueuedAt})
+	}
+	pq.syncOldestEnqueuedLocked()
+}
+
+func (pq *persistentQueue[T]) removeEnqueueTimeLocked(index uint64) {
+	delete(pq.enqueueTimes, index)
+	if len(pq.enqueueHeap) > 2*len(pq.enqueueTimes)+1 {
+		pq.rebuildEnqueueHeapLocked()
+	}
+	pq.syncOldestEnqueuedLocked()
+}
+
+func (pq *persistentQueue[T]) rebuildEnqueueHeapLocked() {
+	pq.enqueueHeap = make(queueOldestHeap, 0, len(pq.enqueueTimes))
+	for index, enqueuedAt := range pq.enqueueTimes {
+		if enqueuedAt.IsZero() {
+			continue
+		}
+		pq.enqueueHeap = append(pq.enqueueHeap, queueOldestEntry{index: index, enqueuedAt: enqueuedAt})
+	}
+	heap.Init(&pq.enqueueHeap)
+}
+
+func (pq *persistentQueue[T]) syncOldestEnqueuedLocked() {
+	for len(pq.enqueueHeap) > 0 {
+		oldest := pq.enqueueHeap[0]
+		enqueuedAt, ok := pq.enqueueTimes[oldest.index]
+		if !ok || enqueuedAt.IsZero() || !enqueuedAt.Equal(oldest.enqueuedAt) {
+			heap.Pop(&pq.enqueueHeap)
+			continue
+		}
+		pq.oldestEnqueued = enqueuedAt
+		return
+	}
+	pq.oldestEnqueued = time.Time{}
+}
+
 func getItemKey(index uint64) string {
 	return strconv.FormatUint(index, 10)
+}
+
+func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
+	buf := make([]byte, queueItemHeaderSize+len(payload))
+	copy(buf[:len(queueItemTimestampMagic)], queueItemTimestampMagic)
+	binary.LittleEndian.PutUint64(buf[len(queueItemTimestampMagic):queueItemHeaderSize], uint64(enqueuedAt.UnixNano()))
+	copy(buf[queueItemHeaderSize:], payload)
+	return buf
+}
+
+func unmarshalQueuedItem(payload []byte) ([]byte, time.Time) {
+	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemTimestampMagic, queueItemHeaderSize, true); ok {
+		return unpackedPayload, enqueuedAt
+	}
+	if unpackedPayload, enqueuedAt, ok := unmarshalQueuedItemWithHeader(payload, queueItemLegacyMagic, queueItemLegacyHeaderSize, true); ok {
+		return unpackedPayload, enqueuedAt
+	}
+	return payload, time.Time{}
+}
+
+func unmarshalQueuedItemWithHeader(payload []byte, magic string, headerSize int, validateTime bool) ([]byte, time.Time, bool) {
+	if len(payload) < headerSize || string(payload[:len(magic)]) != magic {
+		return nil, time.Time{}, false
+	}
+
+	unixNano := int64(binary.LittleEndian.Uint64(payload[len(magic):headerSize]))
+	if validateTime && !isReasonableQueuedItemUnixNano(unixNano) {
+		return nil, time.Time{}, false
+	}
+	if unixNano <= 0 {
+		return payload[headerSize:], time.Time{}, true
+	}
+	return payload[headerSize:], time.Unix(0, unixNano), true
+}
+
+func isReasonableQueuedItemUnixNano(unixNano int64) bool {
+	if unixNano <= 0 {
+		return false
+	}
+
+	enqueuedAt := time.Unix(0, unixNano)
+	now := time.Now().Add(24 * time.Hour)
+	return enqueuedAt.After(time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)) && enqueuedAt.Before(now)
 }
 
 func bytesToItemIndex(buf []byte) (uint64, error) {

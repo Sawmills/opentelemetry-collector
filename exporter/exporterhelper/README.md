@@ -88,6 +88,8 @@ similarly as for in-memory buffering, defaults to 1000 batches).
 
 When persistent queue is enabled, the batches are being buffered using the provided storage extension - [filestorage] is a popular and safe choice. If the collector instance is killed while having some items in the persistent queue, on restart the items will be picked and the exporting is continued.
 
+When using queue age telemetry with a persistent queue, restarted collectors can only restore enqueue timestamps for items that were written with queue-age metadata. If a disk backlog already existed before these timestamps were introduced, `otelcol_exporter_queue_oldest_batch_age` will report `0` for those legacy items after restart until they drain.
+
 **Context Propagation**: Request context (including client metadata and span context) is preserved when using persistent queues. However, context set by Auth extensions is **not** propagated through the persistent queue. Auth extension context is ignored when data is persisted to disk, which means authentication/authorization information will not be available when the persisted data is processed.
 
 ```
