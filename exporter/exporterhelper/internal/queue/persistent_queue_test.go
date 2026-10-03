@@ -683,6 +683,41 @@ func TestPersistentQueue_CurrentlyProcessedItems(t *testing.T) {
 	}
 }
 
+func TestPersistentQueueRecoversLegacyDispatchedItem(t *testing.T) {
+	ctx := context.Background()
+	ext := storagetest.NewMockStorageExtension(nil)
+	ps := createTestPersistentQueueWithRequestsSizer(t, ext, 5)
+	require.NoError(t, ps.Offer(ctx, intRequest(50)))
+	_, req, _, done, found := ps.Read(ctx)
+	require.True(t, found)
+	require.Equal(t, intRequest(50), req)
+
+	// Simulate an unfinished request persisted before enqueue timestamps existed.
+	legacyPayload := []byte("50")
+	require.NoError(t, ps.client.Set(ctx, getItemKey(0), legacyPayload))
+	done.OnDone(experr.NewShutdownErr(nil))
+	require.NoError(t, ps.Shutdown(ctx))
+
+	restarted := createTestPersistentQueueWithRequestsSizer(t, ext, 5)
+	t.Cleanup(func() { require.NoError(t, restarted.Shutdown(ctx)) })
+	require.Equal(t, int64(1), restarted.Size())
+	require.True(t, restarted.OldestTimestamp().IsZero())
+
+	// Check the persisted compatibility contract before Read, which waits if
+	// malformed data is discarded and there are no more requests to consume.
+	payload, err := restarted.client.Get(ctx, getItemKey(restarted.metadata.ReadIndex))
+	require.NoError(t, err)
+	require.Equal(t, legacyPayload, payload)
+
+	_, req, enqueuedAt, done, found := restarted.Read(ctx)
+	require.True(t, found)
+	require.Equal(t, intRequest(50), req)
+	require.True(t, enqueuedAt.IsZero(), "legacy enqueue time must remain unknown")
+	done.OnDone(nil)
+	require.Zero(t, restarted.Size())
+	require.True(t, restarted.OldestTimestamp().IsZero())
+}
+
 // this test attempts to check if all the invariants are kept if the queue is recreated while
 // close to full and with some items dispatched
 func TestPersistentQueueStartWithNonDispatched(t *testing.T) {

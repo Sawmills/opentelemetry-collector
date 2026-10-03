@@ -694,6 +694,10 @@ func getItemKey(index uint64) string {
 }
 
 func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
+	if enqueuedAt.IsZero() {
+		// Recovered legacy requests have no enqueue time; preserve their raw format.
+		return payload
+	}
 	buf := make([]byte, queueItemHeaderSize+len(payload))
 	copy(buf[:len(queueItemTimestampMagic)], queueItemTimestampMagic)
 	binary.LittleEndian.PutUint64(buf[len(queueItemTimestampMagic):queueItemHeaderSize], uint64(enqueuedAt.UnixNano()))

@@ -8,4 +8,5 @@ subtext: |
   exporter attribute and does not change the aggregate failure count.
   Preserve the queue-age metrics and persisted enqueue timestamps from the
   bundled v0.149.0-sawmills.3 helper when publishing from current main.
+  Recovered legacy requests retain their raw format and unknown enqueue time.
 change_logs: [user]
