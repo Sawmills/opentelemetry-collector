@@ -429,9 +429,7 @@ func (pq *persistentQueue[T]) getNextItem(ctx context.Context) (uint64, T, conte
 	getOp := storage.GetOperation(getItemKey(index))
 	err = pq.client.Batch(ctx, storage.SetOperation(metadataKey, metadataBytes), getOp)
 	if err == nil {
-		payload, restoredEnqueuedAt := unmarshalQueuedItem(getOp.Value)
-		enqueuedAt = restoredEnqueuedAt
-		restoredCtx, req, err = pq.encoding.Unmarshal(payload)
+		restoredCtx, req, enqueuedAt, err = pq.unmarshalRequest(getOp.Value)
 	}
 
 	if err != nil {
@@ -539,8 +537,7 @@ func (pq *persistentQueue[T]) enqueueNotDispatchedReqs(ctx context.Context, disp
 			pq.logger.Warn("Failed retrieving item", zap.String(zapKey, op.Key), zap.Error(errValueNotSet))
 			continue
 		}
-		payload, enqueuedAt := unmarshalQueuedItem(op.Value)
-		reqCtx, req, err := pq.encoding.Unmarshal(payload)
+		reqCtx, req, enqueuedAt, err := pq.unmarshalRequest(op.Value)
 		// If error happened or item is nil, it will be efficiently ignored
 		if err != nil {
 			pq.logger.Warn("Failed unmarshalling item", zap.String(zapKey, op.Key), zap.Error(err))
@@ -570,6 +567,8 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 			break
 		}
 	}
+	// Tracking follows logical membership even when persistent cleanup fails.
+	defer pq.removeEnqueueTimeLocked(index)
 
 	// Ensure the used size are in sync when queue is drained.
 	if pq.requestSize() == 0 {
@@ -586,7 +585,6 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 	deleteOp := storage.DeleteOperation(getItemKey(index))
 	err = pq.client.Batch(ctx, setOp, deleteOp)
 	if err == nil {
-		pq.removeEnqueueTimeLocked(index)
 		// Everything ok, exit
 		return nil
 	}
@@ -599,8 +597,6 @@ func (pq *persistentQueue[T]) itemDispatchingFinish(ctx context.Context, index u
 		// Return an error here, as this indicates an issue with the underlying storage medium
 		return fmt.Errorf("failed deleting item from queue, got error from storage: %w", err)
 	}
-
-	pq.removeEnqueueTimeLocked(index)
 
 	if err = pq.client.Batch(ctx, setOp); err != nil {
 		// even if this fails, we still have the right dispatched items in memory
@@ -703,6 +699,24 @@ func marshalQueuedItem(payload []byte, enqueuedAt time.Time) []byte {
 	binary.LittleEndian.PutUint64(buf[len(queueItemTimestampMagic):queueItemHeaderSize], uint64(enqueuedAt.UnixNano()))
 	copy(buf[queueItemHeaderSize:], payload)
 	return buf
+}
+
+func (pq *persistentQueue[T]) unmarshalRequest(data []byte) (context.Context, T, time.Time, error) {
+	payload, enqueuedAt := unmarshalQueuedItem(data)
+	ctx, req, err := pq.encoding.Unmarshal(payload)
+	if err == nil || !enqueuedAt.IsZero() {
+		return ctx, req, enqueuedAt, err
+	}
+
+	// Preserve successful raw legacy decoding, including magic-prefix collisions.
+	// Otherwise an existing envelope with an unreasonable timestamp can still
+	// contain valid telemetry after a clock correction. Recover it with unknown age.
+	if inner, _, ok := unmarshalQueuedItemWithHeader(data, queueItemTimestampMagic, queueItemHeaderSize, false); ok {
+		ctx, req, err = pq.encoding.Unmarshal(inner)
+	} else if inner, _, ok := unmarshalQueuedItemWithHeader(data, queueItemLegacyMagic, queueItemLegacyHeaderSize, false); ok {
+		ctx, req, err = pq.encoding.Unmarshal(inner)
+	}
+	return ctx, req, time.Time{}, err
 }
 
 func unmarshalQueuedItem(payload []byte) ([]byte, time.Time) {

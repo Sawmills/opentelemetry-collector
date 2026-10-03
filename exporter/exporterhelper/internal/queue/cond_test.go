@@ -85,9 +85,16 @@ func TestCondSignalWakesOneWaiter(t *testing.T) {
 
 func TestCondCanceledSignaledWaiterResignalsNextWaiter(t *testing.T) {
 	var mu sync.Mutex
-	c := newCond(&mu)
+	relocking := make(chan struct{}, 2)
+	c := newCond(&relockNotifier{locker: &mu, relocking: relocking})
+	t.Cleanup(func() {
+		mu.Lock()
+		c.Broadcast()
+		mu.Unlock()
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	firstErrCh := make(chan error, 1)
 	secondErrCh := make(chan error, 1)
 
@@ -96,6 +103,11 @@ func TestCondCanceledSignaledWaiterResignalsNextWaiter(t *testing.T) {
 		defer mu.Unlock()
 		firstErrCh <- c.Wait(ctx)
 	}()
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(c.waiters) == 1
+	}, time.Second, time.Millisecond)
 	go func() {
 		mu.Lock()
 		defer mu.Unlock()
@@ -110,6 +122,14 @@ func TestCondCanceledSignaledWaiterResignalsNextWaiter(t *testing.T) {
 
 	mu.Lock()
 	cancel()
+	// Wait until the first waiter has selected cancellation and is trying to
+	// reacquire the mutex. Signaling it now must forward the wake to waiter two.
+	select {
+	case <-relocking:
+	case <-time.After(time.Second):
+		mu.Unlock()
+		t.Fatal("canceled waiter did not try to reacquire the mutex")
+	}
 	c.Signal()
 	mu.Unlock()
 
@@ -126,6 +146,20 @@ func TestCondCanceledSignaledWaiterResignalsNextWaiter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("signal was not forwarded to the next waiter")
 	}
+}
+
+type relockNotifier struct {
+	locker    sync.Locker
+	relocking chan<- struct{}
+}
+
+func (l *relockNotifier) Lock() {
+	l.relocking <- struct{}{}
+	l.locker.Lock()
+}
+
+func (l *relockNotifier) Unlock() {
+	l.locker.Unlock()
 }
 
 func TestCondWaitReturnsOnContextCancel(t *testing.T) {
