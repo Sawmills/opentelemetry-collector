@@ -270,6 +270,10 @@ func TestExportTraceDataOp(t *testing.T) {
 			},
 		}
 	}
+	expectedDataPoints = append(expectedDataPoints, metricdata.DataPoint[int64]{
+		Attributes: attribute.NewSet(attribute.String("exporter", exporterID.String())),
+		Value:      0,
+	})
 	metadatatest.AssertEqualExporterSendFailedSpans(t, tt, expectedDataPoints,
 		metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
 }
@@ -344,6 +348,10 @@ func TestExportMetricsOp(t *testing.T) {
 			},
 		}
 	}
+	expectedDataPoints = append(expectedDataPoints, metricdata.DataPoint[int64]{
+		Attributes: attribute.NewSet(attribute.String("exporter", exporterID.String())),
+		Value:      0,
+	})
 	metadatatest.AssertEqualExporterSendFailedMetricPoints(t, tt, expectedDataPoints,
 		metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
 }
@@ -418,6 +426,10 @@ func TestExportLogsOp(t *testing.T) {
 			},
 		}
 	}
+	expectedDataPoints = append(expectedDataPoints, metricdata.DataPoint[int64]{
+		Attributes: attribute.NewSet(attribute.String("exporter", exporterID.String())),
+		Value:      0,
+	})
 	metadatatest.AssertEqualExporterSendFailedLogRecords(t, tt, expectedDataPoints,
 		metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
 }
@@ -614,6 +626,10 @@ func TestExportProfilesOp(t *testing.T) {
 			},
 		}
 	}
+	expectedDataPoints = append(expectedDataPoints, metricdata.DataPoint[int64]{
+		Attributes: attribute.NewSet(attribute.String("exporter", exporterID.String())),
+		Value:      0,
+	})
 	metadatatest.AssertEqualExporterSendFailedProfileSamples(t, tt, expectedDataPoints,
 		metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
 }

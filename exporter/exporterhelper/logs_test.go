@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -181,6 +182,99 @@ func TestLogs_WithRecordMetrics(t *testing.T) {
 	require.NotNil(t, le)
 
 	checkRecordedMetricsForLogs(t, tt, fakeLogsName, le, nil)
+}
+
+func TestLogs_FailureMetricCoverage(t *testing.T) {
+	tt := componenttest.NewTelemetry()
+	t.Cleanup(func() { require.NoError(t, tt.Shutdown(context.Background())) })
+	ctx := context.Background()
+	var exportErr error
+	le, err := NewLogs(ctx, exporter.Settings{
+		ID: fakeLogsName, TelemetrySettings: tt.NewTelemetrySettings(), BuildInfo: component.NewDefaultBuildInfo(),
+	}, &fakeLogsConfig, func(context.Context, plog.Logs) error { return exportErr })
+	require.NoError(t, err)
+	require.NoError(t, le.Start(ctx, componenttest.NewNopHost()))
+	t.Cleanup(func() { require.NoError(t, le.Shutdown(ctx)) })
+
+	_, err = tt.GetMetric("otelcol_exporter_send_failed_log_records")
+	require.Error(t, err, "an idle exporter has no observed export outcome")
+	require.NoError(t, le.ConsumeLogs(ctx, plog.NewLogs()))
+	_, err = tt.GetMetric("otelcol_exporter_send_failed_log_records")
+	require.Error(t, err, "an empty export does not establish record coverage")
+
+	require.NoError(t, le.ConsumeLogs(ctx, testdata.GenerateLogs(2)))
+	metadatatest.AssertEqualExporterSendFailedLogRecords(t, tt,
+		[]metricdata.DataPoint[int64]{
+			{
+				Attributes: attribute.NewSet(attribute.String("exporter", fakeLogsName.String())),
+				Value:      0,
+			},
+		}, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
+
+	exportErr = errors.New("destination unavailable")
+	require.ErrorIs(t, le.ConsumeLogs(ctx, testdata.GenerateLogs(3)), exportErr)
+	exportErr = nil
+	require.NoError(t, le.ConsumeLogs(ctx, testdata.GenerateLogs(1)))
+	metadatatest.AssertEqualExporterSendFailedLogRecords(t, tt,
+		[]metricdata.DataPoint[int64]{
+			{
+				Attributes: attribute.NewSet(attribute.String("exporter", fakeLogsName.String())),
+				Value:      0,
+			},
+			{
+				Attributes: attribute.NewSet(
+					attribute.String("exporter", fakeLogsName.String()),
+					attribute.String(string(semconv.ErrorTypeKey), "_OTHER"),
+					attribute.Bool(internal.ErrorPermanentKey, false)),
+				Value: 3,
+			},
+		}, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
+	metadatatest.AssertEqualExporterSentLogRecords(t, tt,
+		[]metricdata.DataPoint[int64]{
+			{
+				Attributes: attribute.NewSet(attribute.String("exporter", fakeLogsName.String())),
+				Value:      3,
+			},
+		}, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
+}
+
+func TestLogs_FailureMetricCoverageDelta(t *testing.T) {
+	ctx := context.Background()
+	reader := sdkmetric.NewManualReader(sdkmetric.WithTemporalitySelector(func(sdkmetric.InstrumentKind) metricdata.Temporality {
+		return metricdata.DeltaTemporality
+	}))
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(ctx)) })
+	set := exportertest.NewNopSettings(fakeLogsName.Type())
+	set.ID = fakeLogsName
+	set.MeterProvider = provider
+	le, err := NewLogs(ctx, set, &fakeLogsConfig, newPushLogsData(nil))
+	require.NoError(t, err)
+	require.NoError(t, le.Start(ctx, componenttest.NewNopHost()))
+	t.Cleanup(func() { require.NoError(t, le.Shutdown(ctx)) })
+
+	for range 2 {
+		require.NoError(t, le.ConsumeLogs(ctx, testdata.GenerateLogs(2)))
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(ctx, &rm))
+		var found bool
+		for _, scope := range rm.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				if m.Name == "otelcol_exporter_send_failed_log_records" {
+					found = true
+					metricdatatest.AssertAggregationsEqual(t, metricdata.Sum[int64]{
+						Temporality: metricdata.DeltaTemporality,
+						IsMonotonic: true,
+						DataPoints: []metricdata.DataPoint[int64]{{
+							Attributes: attribute.NewSet(attribute.String("exporter", fakeLogsName.String())),
+							Value:      0,
+						}},
+					}, m.Data, metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreExemplars())
+				}
+			}
+		}
+		require.True(t, found, "each interval with a successful export must carry measured failure coverage")
+	}
 }
 
 func TestLogs_pLogModifiedDownStream_WithRecordMetrics(t *testing.T) {

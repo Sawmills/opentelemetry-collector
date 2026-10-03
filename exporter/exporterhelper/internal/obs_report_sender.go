@@ -128,6 +128,9 @@ func (ors *obsReportSender[K]) endOp(ctx context.Context, numRecords int, err er
 	if ors.itemsFailedInst != nil && numFailedToSend > 0 {
 		withFailedAttrs := metric.WithAttributeSet(extractFailureAttributes(err))
 		ors.itemsFailedInst.Add(ctx, numFailedToSend, ors.metricAttr, withFailedAttrs)
+	} else if ors.itemsFailedInst != nil && numSent > 0 {
+		// Record successful traffic without inventing failure attributes or an idle outcome.
+		ors.itemsFailedInst.Add(ctx, 0, ors.metricAttr)
 	}
 
 	span := trace.SpanFromContext(ctx)
