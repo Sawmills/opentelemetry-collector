@@ -73,6 +73,67 @@ func TestMemoryQueueBlockingCancelled(t *testing.T) {
 	require.NoError(t, q.Shutdown(context.Background()))
 }
 
+func TestMemoryQueueBlockingOfferStampsEnqueueTimeAfterAdmission(t *testing.T) {
+	set := newSettings(request.SizerTypeItems, 1)
+	set.BlockOnOverflow = true
+	q := newMemoryQueue[intRequest](set).(*memoryQueue[intRequest])
+	require.NoError(t, q.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() {
+		require.NoError(t, q.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, q.Offer(context.Background(), 1))
+
+	offerDone := make(chan error, 1)
+	blocked := make(chan struct{})
+	q.onBlockForSpace = func() {
+		select {
+		case <-blocked:
+		default:
+			close(blocked)
+		}
+	}
+	go func() {
+		offerDone <- q.Offer(context.Background(), 1)
+	}()
+
+	<-blocked
+	releaseTime := time.Now()
+
+	_, req, _, done, ok := q.Read(context.Background())
+	require.True(t, ok)
+	require.EqualValues(t, 1, req)
+	done.OnDone(nil)
+
+	require.NoError(t, <-offerDone)
+
+	_, req, enqueuedAt, done, ok := q.Read(context.Background())
+	require.True(t, ok)
+	require.EqualValues(t, 1, req)
+	require.False(t, enqueuedAt.Before(releaseTime), "blocked offer should stamp enqueue time when the item is actually admitted")
+	done.OnDone(nil)
+}
+
+func TestMemoryQueueOldestTimestampTracksInflightItem(t *testing.T) {
+	set := newSettings(request.SizerTypeItems, 1)
+	q := newMemoryQueue[intRequest](set).(*memoryQueue[intRequest])
+	require.NoError(t, q.Start(context.Background(), componenttest.NewNopHost()))
+	defer func() {
+		require.NoError(t, q.Shutdown(context.Background()))
+	}()
+
+	require.NoError(t, q.Offer(context.Background(), 1))
+
+	_, req, enqueuedAt, done, ok := q.Read(context.Background())
+	require.True(t, ok)
+	require.EqualValues(t, 1, req)
+	require.False(t, enqueuedAt.IsZero())
+	require.Equal(t, enqueuedAt, q.OldestTimestamp(), "oldest timestamp should include the in-flight item until Done")
+
+	done.OnDone(nil)
+	require.True(t, q.OldestTimestamp().IsZero())
+}
+
 func TestMemoryQueueDrainWhenShutdown(t *testing.T) {
 	set := newSettings(request.SizerTypeItems, 7)
 	q := newMemoryQueue[intRequest](set)
@@ -140,7 +201,7 @@ func TestMemoryQueueWaitForResultPassErrorBack(t *testing.T) {
 	q := newMemoryQueue[intRequest](set)
 	require.NoError(t, q.Start(context.Background(), componenttest.NewNopHost()))
 	wg.Go(func() {
-		_, req, done, ok := q.Read(context.Background())
+		_, req, _, done, ok := q.Read(context.Background())
 		assert.True(t, ok)
 		assert.EqualValues(t, 1, req)
 		done.OnDone(myErr)
@@ -160,7 +221,7 @@ func TestMemoryQueueWaitForResultCancelIncomingRequest(t *testing.T) {
 
 	// Consume async new data.
 	wg.Go(func() {
-		_, _, done, ok := q.Read(context.Background())
+		_, _, _, done, ok := q.Read(context.Background())
 		assert.True(t, ok)
 		<-stop
 		done.OnDone(nil)
@@ -187,7 +248,7 @@ func TestMemoryQueueWaitForResultSizeAndCapacity(t *testing.T) {
 
 	// Consume async new data.
 	wg.Go(func() {
-		_, _, done, ok := q.Read(context.Background())
+		_, _, _, done, ok := q.Read(context.Background())
 		assert.True(t, ok)
 		<-stop
 		done.OnDone(nil)
@@ -216,7 +277,7 @@ func BenchmarkMemoryQueueWaitForResult(b *testing.B) {
 	// Consume async new data.
 	wg.Go(func() {
 		for {
-			_, req, done, ok := q.Read(context.Background())
+			_, req, _, done, ok := q.Read(context.Background())
 			if !ok {
 				return
 			}
@@ -315,7 +376,7 @@ func (decodeErrEncoding) Unmarshal([]byte) (context.Context, intRequest, error) 
 }
 
 func consume[T any](q readableQueue[T], consumeFunc func(context.Context, T) error) bool {
-	ctx, req, done, ok := q.Read(context.Background())
+	ctx, req, _, done, ok := q.Read(context.Background())
 	if !ok {
 		return false
 	}

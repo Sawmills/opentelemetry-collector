@@ -4,6 +4,8 @@
 package queue
 
 import (
+	"bytes"
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -46,6 +48,24 @@ func (i intRequest) BytesSize() int {
 
 type int64Encoding struct {
 	rc ReferenceCounter[intRequest]
+}
+
+type prefixedInt64Encoding struct {
+	prefix []byte
+	base   int64Encoding
+}
+
+func (e prefixedInt64Encoding) Marshal(ctx context.Context, req intRequest) ([]byte, error) {
+	payload, err := e.base.Marshal(ctx, req)
+	return append(bytes.Clone(e.prefix), payload...), err
+}
+
+func (e prefixedInt64Encoding) Unmarshal(payload []byte) (context.Context, intRequest, error) {
+	suffix, ok := bytes.CutPrefix(payload, e.prefix)
+	if !ok {
+		return context.Background(), 0, errors.New("missing request prefix")
+	}
+	return e.base.Unmarshal(suffix)
 }
 
 func (int64Encoding) Marshal(_ context.Context, val intRequest) ([]byte, error) {
@@ -315,7 +335,7 @@ func TestPersistentQueue_FullCapacity(t *testing.T) {
 			// The consumer picks first request. Wait until the consumer is blocked on done.
 			require.NoError(t, pq.Offer(context.Background(), intRequest(10)))
 			assert.Equal(t, 1*tt.sizeMultiplier, pq.Size())
-			_, _, done, ok := pq.Read(context.Background())
+			_, _, _, done, ok := pq.Read(context.Background())
 			assert.True(t, ok)
 			done.OnDone(nil)
 			assert.Equal(t, int64(0), pq.Size())
@@ -376,11 +396,14 @@ func TestPersistentQueue_ConsumersProducers(t *testing.T) {
 		t.Run(fmt.Sprintf("#messages: %d #consumers: %d", c.numMessagesProduced, c.numConsumers), func(t *testing.T) {
 			consumed := &atomic.Int64{}
 
-			pq := newPersistentQueue[intRequest](newSettingsWithStorage(request.SizerTypeRequests, 1000))
-			aq := newAsyncQueue[intRequest](pq, c.numConsumers, func(_ context.Context, _ intRequest, done Done) {
+			set := newSettingsWithStorage(request.SizerTypeRequests, 1000)
+			set.NumConsumers = c.numConsumers
+			pq := newPersistentQueue[intRequest](set)
+			aq, err := newAsyncQueue[intRequest](pq, set, func(_ context.Context, _ intRequest, done Done) {
 				consumed.Add(int64(1))
 				done.OnDone(nil)
-			}, nil)
+			})
+			require.NoError(t, err)
 			require.NoError(t, aq.Start(context.Background(), hosttest.NewHost(map[component.ID]component.Component{
 				{}: storagetest.NewMockStorageExtension(nil),
 			},
@@ -401,6 +424,10 @@ func TestPersistentQueue_ConsumersProducers(t *testing.T) {
 }
 
 func TestPersistentBlockingQueue(t *testing.T) {
+	const offersPerProducer = 20_000
+	const producers = 10
+	const totalOffers = offersPerProducer * producers
+
 	tests := []struct {
 		name      string
 		sizerType request.SizerType
@@ -419,21 +446,23 @@ func TestPersistentBlockingQueue(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			set := newSettingsWithStorage(tt.sizerType, 1000)
 			set.BlockOnOverflow = true
+			set.NumConsumers = 10
 			pq := newPersistentQueue[intRequest](set)
 			consumed := &atomic.Int64{}
-			ac := newAsyncQueue(pq, 10, func(_ context.Context, _ intRequest, done Done) {
+			ac, err := newAsyncQueue(pq, set, func(_ context.Context, _ intRequest, done Done) {
 				consumed.Add(1)
 				done.OnDone(nil)
-			}, set.ReferenceCounter)
+			})
+			require.NoError(t, err)
 			require.NoError(t, ac.Start(context.Background(), hosttest.NewHost(map[component.ID]component.Component{
 				{}: storagetest.NewMockStorageExtension(nil),
 			})))
 
 			td := intRequest(10)
 			wg := &sync.WaitGroup{}
-			for range 10 {
+			for range producers {
 				wg.Go(func() {
-					for range 100_000 {
+					for range offersPerProducer {
 						assert.NoError(t, pq.Offer(context.Background(), td))
 					}
 				})
@@ -441,7 +470,7 @@ func TestPersistentBlockingQueue(t *testing.T) {
 			wg.Wait()
 			// Because the persistent queue is not draining after Shutdown, need to wait here for the drain.
 			assert.Eventually(t, func() bool {
-				return int(consumed.Load()) == 1_000_000
+				return int(consumed.Load()) == totalOffers
 			}, 5*time.Second, 10*time.Millisecond)
 			require.NoError(t, ac.Shutdown(context.Background()))
 		})
@@ -630,13 +659,13 @@ func TestPersistentQueue_CurrentlyProcessedItems(t *testing.T) {
 	requireCurrentlyDispatchedItemsEqual(t, ps, []uint64{})
 
 	// Takes index 0 in process.
-	_, readReq, _, found := ps.Read(context.Background())
+	_, readReq, _, _, found := ps.Read(context.Background())
 	require.True(t, found)
 	assert.Equal(t, req, readReq)
 	requireCurrentlyDispatchedItemsEqual(t, ps, []uint64{0})
 
 	// This takes item 1 to process.
-	_, secondReadReq, secondDone, found := ps.Read(context.Background())
+	_, secondReadReq, _, secondDone, found := ps.Read(context.Background())
 	require.True(t, found)
 	assert.Equal(t, req, secondReadReq)
 	requireCurrentlyDispatchedItemsEqual(t, ps, []uint64{0, 1})
@@ -670,6 +699,90 @@ func TestPersistentQueue_CurrentlyProcessedItems(t *testing.T) {
 		bb, err := newPs.client.Get(context.Background(), getItemKey(i))
 		require.NoError(t, err)
 		require.Nil(t, bb)
+	}
+}
+
+func TestPersistentQueueRecoversLegacyDispatchedItem(t *testing.T) {
+	ctx := context.Background()
+	ext := storagetest.NewMockStorageExtension(nil)
+	ps := createTestPersistentQueueWithRequestsSizer(t, ext, 5)
+	require.NoError(t, ps.Offer(ctx, intRequest(50)))
+	_, req, _, done, found := ps.Read(ctx)
+	require.True(t, found)
+	require.Equal(t, intRequest(50), req)
+
+	// Simulate an unfinished request persisted before enqueue timestamps existed.
+	legacyPayload := []byte("50")
+	require.NoError(t, ps.client.Set(ctx, getItemKey(0), legacyPayload))
+	done.OnDone(experr.NewShutdownErr(nil))
+	require.NoError(t, ps.Shutdown(ctx))
+
+	restarted := createTestPersistentQueueWithRequestsSizer(t, ext, 5)
+	t.Cleanup(func() { require.NoError(t, restarted.Shutdown(ctx)) })
+	require.Equal(t, int64(1), restarted.Size())
+	require.True(t, restarted.OldestTimestamp().IsZero())
+
+	// Check the persisted compatibility contract before Read, which waits if
+	// malformed data is discarded and there are no more requests to consume.
+	payload, err := restarted.client.Get(ctx, getItemKey(restarted.metadata.ReadIndex))
+	require.NoError(t, err)
+	require.Equal(t, legacyPayload, payload)
+
+	_, req, enqueuedAt, done, found := restarted.Read(ctx)
+	require.True(t, found)
+	require.Equal(t, intRequest(50), req)
+	require.True(t, enqueuedAt.IsZero(), "legacy enqueue time must remain unknown")
+	done.OnDone(nil)
+	require.Zero(t, restarted.Size())
+	require.True(t, restarted.OldestTimestamp().IsZero())
+}
+
+func TestPersistentQueuePreservesRequestAfterClockRollback(t *testing.T) {
+	for _, dispatched := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dispatched=%t", dispatched), func(t *testing.T) {
+			ctx := context.Background()
+			ext := storagetest.NewMockStorageExtension(nil)
+			ps := createTestPersistentQueueWithRequestsSizer(t, ext, 5)
+			require.NoError(t, ps.Offer(ctx, intRequest(50)))
+			if dispatched {
+				_, _, _, done, found := ps.Read(ctx)
+				require.True(t, found)
+				done.OnDone(experr.NewShutdownErr(nil))
+			}
+			// A clock correction can make a valid persisted enqueue time appear far ahead.
+			payload := marshalQueuedItem([]byte("50"), time.Now().Add(48*time.Hour))
+			require.NoError(t, ps.client.Set(ctx, getItemKey(0), payload))
+			require.NoError(t, ps.Shutdown(ctx))
+
+			restarted := createTestPersistentQueueWithRequestsSizer(t, ext, 5)
+			var shutdownOnce sync.Once
+			shutdown := func() { shutdownOnce.Do(func() { require.NoError(t, restarted.Shutdown(ctx)) }) }
+			t.Cleanup(shutdown)
+			require.Equal(t, int64(1), restarted.Size())
+			require.True(t, restarted.OldestTimestamp().IsZero())
+
+			var req intRequest
+			var enqueuedAt time.Time
+			var done Done
+			var found bool
+			readDone := make(chan struct{})
+			go func() {
+				_, req, enqueuedAt, done, found = restarted.Read(ctx)
+				close(readDone)
+			}()
+			select {
+			case <-readDone:
+			case <-time.After(time.Second):
+				shutdown()
+				<-readDone
+				t.Fatal("persisted request was not recovered")
+			}
+			require.True(t, found)
+			require.Equal(t, intRequest(50), req)
+			require.True(t, enqueuedAt.IsZero())
+			done.OnDone(nil)
+			require.Zero(t, restarted.Size())
+		})
 	}
 }
 
@@ -770,7 +883,7 @@ func TestPersistentQueue_PutCloseReadClose(t *testing.T) {
 	require.NoError(t, ps.Offer(context.Background(), req))
 	assert.Equal(t, int64(2), ps.Size())
 	// TODO: Remove this, after the initialization writes the readIndex.
-	_, _, _, _ = ps.Read(context.Background())
+	_, _, _, _, _ = ps.Read(context.Background())
 	require.NoError(t, ps.Shutdown(context.Background()))
 
 	newPs := createTestPersistentQueueWithRequestsSizer(t, ext, 1000)
@@ -868,6 +981,126 @@ func TestItemIndexArrayMarshaling(t *testing.T) {
 	}
 }
 
+func TestMarshalQueuedItemRoundTrip(t *testing.T) {
+	payload := []byte("payload")
+	enqueuedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Nanosecond)
+
+	marshaled := marshalQueuedItem(payload, enqueuedAt)
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(marshaled)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.Equal(t, enqueuedAt.UnixNano(), unmarshaledTime.UnixNano())
+}
+
+func TestUnmarshalQueuedItemDoesNotMisclassifyLegacyPayloadPrefix(t *testing.T) {
+	payload := append([]byte(queueItemLegacyMagic), []byte("legacy-payload")...)
+
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(payload)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.True(t, unmarshaledTime.IsZero())
+}
+
+func TestUnmarshalQueuedItemDoesNotMisclassifyNewPayloadPrefix(t *testing.T) {
+	payload := append([]byte(queueItemTimestampMagic), []byte("new-payload")...)
+
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(payload)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.True(t, unmarshaledTime.IsZero())
+}
+
+func TestUnmarshalQueuedItemHandlesLegacyHeader(t *testing.T) {
+	payload := []byte("payload")
+	enqueuedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Nanosecond)
+	legacyHeaderSize := len(queueItemLegacyMagic) + 8
+	marshaled := make([]byte, legacyHeaderSize+len(payload))
+	copy(marshaled[:len(queueItemLegacyMagic)], queueItemLegacyMagic)
+	binary.LittleEndian.PutUint64(marshaled[len(queueItemLegacyMagic):legacyHeaderSize], uint64(enqueuedAt.UnixNano()))
+	copy(marshaled[legacyHeaderSize:], payload)
+
+	unmarshaledPayload, unmarshaledTime := unmarshalQueuedItem(marshaled)
+
+	require.Equal(t, payload, unmarshaledPayload)
+	require.Equal(t, enqueuedAt.UnixNano(), unmarshaledTime.UnixNano())
+}
+
+func TestPersistentQueueDecodePreservesRawMagicPrefix(t *testing.T) {
+	for _, magic := range []string{queueItemTimestampMagic, queueItemLegacyMagic} {
+		t.Run(magic, func(t *testing.T) {
+			pq := createTestPersistentQueueWithClient(newFakeBoundedStorageClient(4096))
+			prefix := []byte(magic + "legacy-payload-")
+			pq.encoding = prefixedInt64Encoding{prefix: prefix, base: int64Encoding{&fakeReferenceCounter{}}}
+			payload := append(bytes.Clone(prefix), []byte("50")...)
+			_, req, enqueuedAt, err := pq.unmarshalRequest(payload)
+			require.NoError(t, err)
+			require.Equal(t, intRequest(50), req)
+			require.True(t, enqueuedAt.IsZero())
+		})
+	}
+}
+
+func TestPersistentQueueDecodeRejectsMalformedPayloadAfterClockRollback(t *testing.T) {
+	pq := createTestPersistentQueueWithClient(newFakeBoundedStorageClient(4096))
+	payload := marshalQueuedItem([]byte("invalid-request"), time.Now().Add(48*time.Hour))
+	_, _, _, err := pq.unmarshalRequest(payload)
+	require.Error(t, err)
+}
+
+func TestPersistentQueueSyncOldestEnqueuedLockedSkipsDeletedEntries(t *testing.T) {
+	pq := createTestPersistentQueueWithClient(newFakeBoundedStorageClient(4096))
+	first := time.Unix(0, 100)
+	second := time.Unix(0, 200)
+	third := time.Unix(0, 300)
+
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	pq.enqueueTimes[0] = first
+	pq.enqueueTimes[1] = second
+	pq.enqueueTimes[2] = third
+	heap.Push(&pq.enqueueHeap, queueOldestEntry{index: 0, enqueuedAt: first})
+	heap.Push(&pq.enqueueHeap, queueOldestEntry{index: 1, enqueuedAt: second})
+	heap.Push(&pq.enqueueHeap, queueOldestEntry{index: 2, enqueuedAt: third})
+
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, first, pq.oldestEnqueued)
+
+	delete(pq.enqueueTimes, 0)
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, second, pq.oldestEnqueued)
+
+	delete(pq.enqueueTimes, 1)
+	pq.syncOldestEnqueuedLocked()
+	require.Equal(t, third, pq.oldestEnqueued)
+
+	delete(pq.enqueueTimes, 2)
+	pq.syncOldestEnqueuedLocked()
+	require.True(t, pq.oldestEnqueued.IsZero())
+}
+
+func TestPersistentQueueSyncOldestEnqueuedLockedCompactsStaleHeapEntries(t *testing.T) {
+	pq := createTestPersistentQueueWithClient(newFakeBoundedStorageClient(4096))
+
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	base := time.Now().Add(-time.Hour)
+	for i := range 32 {
+		enqueuedAt := base.Add(time.Duration(i) * time.Second)
+		pq.enqueueTimes[uint64(i)] = enqueuedAt
+		heap.Push(&pq.enqueueHeap, queueOldestEntry{index: uint64(i), enqueuedAt: enqueuedAt})
+	}
+
+	for i := range 31 {
+		delete(pq.enqueueTimes, uint64(i))
+	}
+
+	pq.syncOldestEnqueuedLocked()
+	require.Len(t, pq.enqueueTimes, 1)
+	require.LessOrEqual(t, len(pq.enqueueHeap), 2, "heap should be compacted after most entries become stale")
+}
+
 func TestPersistentQueue_ShutdownWhileConsuming(t *testing.T) {
 	ps := createTestPersistentQueueWithRequestsSizer(t, storagetest.NewMockStorageExtension(nil), 1000)
 
@@ -876,7 +1109,7 @@ func TestPersistentQueue_ShutdownWhileConsuming(t *testing.T) {
 
 	require.NoError(t, ps.Offer(context.Background(), intRequest(50)))
 
-	_, _, done, ok := ps.Read(context.Background())
+	_, _, _, done, ok := ps.Read(context.Background())
 	require.True(t, ok)
 	assert.False(t, ps.client.(*storagetest.MockStorageClient).IsClosed())
 	require.NoError(t, ps.Shutdown(context.Background()))
@@ -971,8 +1204,21 @@ func TestPersistentQueue_ItemDispatchingFinish_ErrorHandling(t *testing.T) {
 			client := newFakeStorageClientWithErrors(tt.storageErrors)
 			ps := createTestPersistentQueueWithClient(client)
 			client.Reset()
+			first := time.Now().Add(-time.Minute)
+			second := time.Now()
+			ps.metadata.ReadIndex = 2
+			ps.metadata.WriteIndex = 2
+			ps.metadata.CurrentlyDispatchedItems = []uint64{0, 1}
+			ps.enqueueTimes = map[uint64]time.Time{0: first, 1: second}
+			ps.rebuildEnqueueHeapLocked()
+			ps.syncOldestEnqueuedLocked()
 
 			require.ErrorIs(t, ps.itemDispatchingFinish(context.Background(), 0), tt.expectedError)
+			require.Equal(t, second, ps.OldestTimestamp(), "completed item must stop contributing queue age even if storage cleanup fails")
+			require.NoError(t, ps.itemDispatchingFinish(context.Background(), 1))
+			require.True(t, ps.OldestTimestamp().IsZero())
+			require.Empty(t, ps.enqueueTimes)
+			require.Empty(t, ps.enqueueHeap)
 		})
 	}
 }
