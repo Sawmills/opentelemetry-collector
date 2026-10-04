@@ -116,6 +116,9 @@ func (or *obsQueue[T]) Offer(ctx context.Context, req T) error {
 	// No metrics recorded for profiles, remove enqueueFailedInst check with nil when profiles metrics available.
 	if err != nil && or.enqueueFailedInst != nil {
 		or.enqueueFailedInst.Add(ctx, int64(numItems), or.enqueueFailedAttr)
+	} else if or.enqueueFailedInst != nil && numItems > 0 {
+		// Record successful admission without inventing coverage for an idle or empty queue.
+		or.enqueueFailedInst.Add(ctx, 0, or.enqueueFailedAttr)
 	}
 	return err
 }

@@ -1,0 +1,6 @@
+change_type: bug_fix
+component: pkg/exporterhelper
+note: Expose zero enqueue failures after successful admission of nonempty requests.
+issues: []
+subtext: Idle queues and successful empty requests remain unmeasured. Existing failure counts are preserved.
+change_logs: [user]

@@ -36,6 +36,11 @@ When `block_on_overflow` is enabled, the caller may instead wait until space bec
 
 If data is rejected before entering the queue, it does not reach the exporter retry logic. Such enqueue failures are reported by the `otelcol_exporter_enqueue_failed_*` metrics.
 
+A successful enqueue of a nonempty request records zero failed items for that exporter.
+This exposes the failure counter during successful traffic without changing its cumulative failure count.
+An idle queue or a successful empty request does not create failure coverage.
+These measurements cover the exporter helper sending queue, not a separate custom queue or final delivery to the destination.
+
 #### Sending queue batch settings
 
 Batch settings are available in the sending queue. Batching is disabled, by default. To enable default
