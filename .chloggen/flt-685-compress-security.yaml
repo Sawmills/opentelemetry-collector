@@ -1,6 +1,6 @@
 change_type: bug_fix
 component: all
-note: Upgrade github.com/klauspost/compress to v1.20.2 to fix GO-2026-6865.
+note: Upgrade the compression dependency to v1.20.2 to fix GO-2026-6865.
 issues: [18]
 subtext: |
   This dependency update supports FLT-685 and preserves the Go 1.25 module minimum.
