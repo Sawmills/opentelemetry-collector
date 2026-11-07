@@ -12,7 +12,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -30,13 +29,16 @@ func TestSharedAdmissionBoundsCancellationAndShutdown(t *testing.T) {
 		tel := componenttest.NewTelemetry()
 		defer func() { require.NoError(t, tel.Shutdown(context.Background())) }()
 		started := make(chan struct{}, 20)
+		contextErrors := make(chan error, 20)
 		release := make(chan struct{})
 		var mu sync.Mutex
 		ids := map[string]int{}
 		sink, err := consumer.NewLogs(func(ctx context.Context, data plog.Logs) error {
 			started <- struct{}{}
 			<-release
-			assert.NoError(t, ctx.Err(), "accepted work must not inherit caller cancellation")
+			if contextErr := ctx.Err(); contextErr != nil {
+				contextErrors <- contextErr
+			}
 			id := data.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Str()
 			mu.Lock()
 			ids[id]++
@@ -69,8 +71,8 @@ func TestSharedAdmissionBoundsCancellationAndShutdown(t *testing.T) {
 		go func() { result <- logs.ConsumeLogs(ctx, rejected) }()
 		synctest.Wait()
 		select {
-		case err := <-result:
-			t.Fatalf("hot admission borrowed the idle queue: %v", err)
+		case admissionErr := <-result:
+			t.Fatalf("hot admission borrowed the idle queue: %v", admissionErr)
 		default:
 		}
 		for i := range 8 {
@@ -117,6 +119,7 @@ func TestSharedAdmissionBoundsCancellationAndShutdown(t *testing.T) {
 		require.Equal(t, 1, rejected.LogRecordCount())
 		close(release)
 		require.NoError(t, <-shutdown)
+		require.Empty(t, contextErrors, "accepted work must not inherit caller cancellation")
 		require.Len(t, ids, 18)
 		for _, tenant := range []string{"hot", "idle"} {
 			require.Equal(t, 1, ids[tenant+"/active/000"])

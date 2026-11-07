@@ -207,14 +207,20 @@ func (mb *sharedMetadataBatcher[T]) run(worker *shard[T]) {
 			worker.resetTimer()
 		case sharedItem:
 			if group == nil {
-				worker.exportCtx = selected.exportCtx
-				worker.stopTimer()
-				worker.resetTimer()
+				worker.bindExportContext(selected.exportCtx)
 			}
 			group = selected
 			worker.processItem(item)
 		}
 	}
+}
+
+// bindExportContext switches an empty worker to a detached group context and
+// starts that group's flush interval. It never derives from the previous context.
+func (b *shard[T]) bindExportContext(ctx context.Context) {
+	b.exportCtx = ctx
+	b.stopTimer()
+	b.resetTimer()
 }
 
 func (mb *sharedMetadataBatcher[T]) currentMetadataCardinality() int {

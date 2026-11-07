@@ -108,7 +108,7 @@ func runMetadataAdmissionFixture(t *testing.T, share bool, numShards uint32) adm
 		for _, r := range results {
 			if r.err != nil {
 				accepted--
-				assert.ErrorIs(t, r.err, context.DeadlineExceeded)
+				require.ErrorIs(t, r.err, context.DeadlineExceeded)
 				assert.Equal(t, 500, r.data.LogRecordCount(), "rejected admission must leave the caller's request intact")
 			}
 		}

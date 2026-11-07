@@ -140,7 +140,8 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		shutdownC:        make(chan struct{}, 1),
 	}
 	numShards := min(max(int(cfg.NumShards), 1), runtime.GOMAXPROCS(0))
-	if len(mks) == 0 {
+	switch {
+	case len(mks) == 0:
 		if numShards == 1 {
 			bp.batcher = &singleShardBatcher[T]{
 				processor: bp,
@@ -151,12 +152,12 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 				set: bp.newShardSet(nil, numShards),
 			}
 		}
-	} else if cfg.ShareIdleWorkers {
+	case cfg.ShareIdleWorkers:
 		bp.batcher = &sharedMetadataBatcher[T]{
 			processor: bp, metadataKeys: mks, metadataLimit: int(cfg.MetadataCardinalityLimit), numShards: numShards,
 			groups: make(map[attribute.Set]*sharedMetadataGroup[T]), changed: make(chan struct{}),
 		}
-	} else {
+	default:
 		bp.batcher = &multiShardBatcher[T]{
 			metadataKeys:  mks,
 			metadataLimit: int(cfg.MetadataCardinalityLimit),
