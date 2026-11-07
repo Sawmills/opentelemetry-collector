@@ -44,6 +44,7 @@ type batchProcessor[T any] struct {
 	timeout          time.Duration
 	sendBatchSize    int
 	sendBatchMaxSize int
+	inputBufferSize  int
 
 	// batchFunc is a factory for new batch objects corresponding
 	// with the appropriate signal.
@@ -133,6 +134,7 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 
 		sendBatchSize:    int(cfg.SendBatchSize),
 		sendBatchMaxSize: int(cfg.SendBatchMaxSize),
+		inputBufferSize:  runtime.NumCPU(),
 		timeout:          cfg.Timeout,
 		batchFunc:        batchFunc,
 		shutdownC:        make(chan struct{}, 1),
@@ -148,6 +150,11 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 			bp.batcher = &fixedShardBatcher[T]{
 				set: bp.newShardSet(nil, numShards),
 			}
+		}
+	} else if cfg.ShareIdleWorkers {
+		bp.batcher = &sharedMetadataBatcher[T]{
+			processor: bp, metadataKeys: mks, metadataLimit: int(cfg.MetadataCardinalityLimit), numShards: numShards,
+			groups: make(map[attribute.Set]*sharedMetadataGroup[T]), changed: make(chan struct{}),
 		}
 	} else {
 		bp.batcher = &multiShardBatcher[T]{
@@ -200,7 +207,7 @@ func (bp *batchProcessor[T]) newShard(md map[string][]string, inputBufferSize in
 
 func (bp *batchProcessor[T]) newShardSet(md map[string][]string, numShards int) *shardSet[T] {
 	shards := make([]*shard[T], 0, numShards)
-	totalInputBufferSize := runtime.NumCPU()
+	totalInputBufferSize := bp.inputBufferSize
 	for i := range numShards {
 		shards = append(
 			shards,
@@ -221,6 +228,9 @@ func (bp *batchProcessor[T]) Start(ctx context.Context, _ component.Host) error 
 
 // Shutdown is invoked during service shutdown.
 func (bp *batchProcessor[T]) Shutdown(context.Context) error {
+	if shared, ok := bp.batcher.(*sharedMetadataBatcher[T]); ok {
+		shared.close()
+	}
 	close(bp.shutdownC)
 
 	// Wait until all goroutines are done.

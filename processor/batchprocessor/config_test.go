@@ -35,6 +35,7 @@ func TestUnmarshalConfig(t *testing.T) {
 			Timeout:                  time.Second * 10,
 			MetadataCardinalityLimit: 1000,
 			NumShards:                4,
+			ShareIdleWorkers:         true,
 		}, cfg)
 }
 

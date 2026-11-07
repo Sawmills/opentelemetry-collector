@@ -1,0 +1,8 @@
+change_type: enhancement
+component: processor/batch
+note: Add an opt-in share_idle_workers setting so idle metadata workers can serve a busy metadata group.
+issues: []
+subtext: |
+  The setting defaults to false and preserves per-group input capacity and total worker count.
+  It requires concurrency-safe downstream consumers and permits same-metadata completion out of order, even with num_shards set to one.
+change_logs: [user, api]

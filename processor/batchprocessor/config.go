@@ -54,6 +54,11 @@ type Config struct {
 	// data and hold one pending batch per worker. Enable this only when every
 	// downstream component is safe for concurrent Consume calls.
 	NumShards uint32 `mapstructure:"num_shards,omitempty"`
+
+	// ShareIdleWorkers allows metadata groups to share their processing workers.
+	// This opt-in requires concurrency-safe downstream consumers and can reorder
+	// same-metadata data, even when NumShards is one. Admission limits do not grow.
+	ShareIdleWorkers bool `mapstructure:"share_idle_workers,omitempty"`
 	// prevent unkeyed literal initialization
 	_ struct{}
 }
