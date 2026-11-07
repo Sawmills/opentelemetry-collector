@@ -51,12 +51,16 @@ ignored as data will be sent immediately, subject to only `send_batch_max_size`.
   metadata key values that will be processed over the lifetime of the
   process.
 - `num_shards` (default = 1): Number of independent batch workers. With
-  `metadata_keys`, each metadata combination owns this many workers. Values
+  `metadata_keys`, each metadata combination adds this many workers. Values
   greater than one allow downstream consumers to run concurrently, but may
   reorder same-metadata data and hold one pending batch per worker. Enable
   sharding only when every downstream component is safe for concurrent
   consumption. The maximum is the smaller of 64 and the runtime's available
   processor count.
+- `share_idle_workers` (default = false): Allows an idle worker to process
+  another metadata combination's data. This applies only with `metadata_keys`.
+  Enable it only when every downstream component supports concurrent calls.
+  Same-metadata data can finish out of order, even with `num_shards: 1`.
 
 See notes about metadata batching below.
 
@@ -125,10 +129,22 @@ Users of the batching processor configured with metadata keys should
 consider use of an Auth extension to validate the relevant
 metadata-key values.
 
-`num_shards` does not change the metadata cardinality limit. It controls the
-bounded worker count within each metadata combination, while aggregate
-input-channel capacity for that combination remains fixed and is divided among
-its workers.
+`num_shards` does not change the metadata cardinality limit or the aggregate
+input-channel capacity for each metadata combination. By default, each
+combination owns its workers and divides its input capacity among them.
+
+With `share_idle_workers: true`, each combination keeps one bounded input queue.
+Its capacity equals the combined input capacity of the default worker queues.
+Each new combination adds the same number of workers as before. An empty
+worker rotates among combinations with queued data. A worker keeps its batch
+and selected client metadata together until that batch is empty. Partial batches
+wait for matching data or their flush timeout before the worker can switch.
+
+Sharing preserves the number of workers and each combination's queue capacity.
+It can create several partial batches for a busy combination, up to the total
+worker count. Downstream processing still owns export failures and retries.
+The batch processor logs a downstream error and does not retry the accepted data.
+Without sharing, `num_shards: 1` keeps each combination serial.
 
 The number of batch processors currently in use is exported as the
 `otelcol_processor_batch_metadata_cardinality` metric.
