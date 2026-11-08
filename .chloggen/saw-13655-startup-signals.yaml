@@ -1,0 +1,10 @@
+change_type: bug_fix
+component: pkg/otelcol
+note: Register process signals before component startup so the existing control loop receives signals delivered during startup.
+issues: []
+subtext: |
+  SIGINT and SIGTERM queue during startup when graceful shutdown is enabled.
+  SIGHUP queues in both modes and triggers a configuration reload after successful startup.
+  Queued signals are discarded if startup fails.
+  If startup never returns, queued signals cannot stop the process; use SIGKILL.
+change_logs: [user]

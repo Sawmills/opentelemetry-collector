@@ -324,7 +324,19 @@ func newFallbackLogger(options []zap.Option) (*zap.Logger, error) {
 // Run starts the collector according to the given configuration, and waits for it to complete.
 // Consecutive calls to Run are not allowed, Run shouldn't be called once a collector is shut down.
 // Sets up the control logic for config reloading and shutdown.
+// SIGHUP and enabled graceful-shutdown signals received during startup are
+// processed after startup succeeds and discarded if startup fails. SIGHUP
+// triggers a configuration reload in both modes. If startup never returns,
+// buffered signals cannot stop it; forced termination requires SIGKILL.
 func (col *Collector) Run(ctx context.Context) error {
+	// Always notify with SIGHUP for configuration reloading.
+	signal.Notify(col.signalsChannel, SIGHUP)
+	defer signal.Stop(col.signalsChannel)
+
+	// Only notify with SIGTERM and SIGINT if graceful shutdown is enabled.
+	if !col.set.DisableGracefulShutdown {
+		signal.Notify(col.signalsChannel, os.Interrupt, SIGTERM)
+	}
 	// setupConfigurationComponents is the "main" function responsible for startup
 	if err := col.setupConfigurationComponents(ctx); err != nil {
 		col.setCollectorState(StateClosed)
@@ -344,15 +356,6 @@ func (col *Collector) Run(ctx context.Context) error {
 		}
 
 		return err
-	}
-
-	// Always notify with SIGHUP for configuration reloading.
-	signal.Notify(col.signalsChannel, SIGHUP)
-	defer signal.Stop(col.signalsChannel)
-
-	// Only notify with SIGTERM and SIGINT if graceful shutdown is enabled.
-	if !col.set.DisableGracefulShutdown {
-		signal.Notify(col.signalsChannel, os.Interrupt, SIGTERM)
 	}
 
 	// Control loop: selects between channels for various interrupts - when this loop is broken, the collector exits.
