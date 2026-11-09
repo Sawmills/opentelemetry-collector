@@ -310,7 +310,10 @@ func TestPartitionBatcher_Split_TimeoutDisabled(t *testing.T) {
 			}, 1*time.Second, 10*time.Millisecond)
 
 			// At this point the 7th not failing request is still pending.
-			assert.EqualValues(t, 6, done.success.Load())
+			// Sink accounting is visible before its asynchronous done callback.
+			assert.Eventually(t, func() bool {
+				return done.success.Load() == 6
+			}, time.Second, 10*time.Millisecond)
 
 			require.NoError(t, ba.Shutdown(context.Background()))
 
