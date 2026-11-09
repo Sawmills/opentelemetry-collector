@@ -24,6 +24,8 @@ import (
 // At least one Provider must be set.
 func NewCommand(set CollectorSettings) *cobra.Command {
 	flagSet := flags(featuregate.GlobalRegistry())
+	flagSet.DurationVar(&set.StartupTimeout, "startup-timeout", set.StartupTimeout,
+		"Optional configuration and component startup timeout; zero preserves the caller context.")
 	rootCmd := &cobra.Command{
 		Use:          set.BuildInfo.Command,
 		Version:      set.BuildInfo.Version,
