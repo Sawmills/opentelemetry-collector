@@ -26,6 +26,8 @@ func NewCommand(set CollectorSettings) *cobra.Command {
 	flagSet := flags(featuregate.GlobalRegistry())
 	flagSet.DurationVar(&set.StartupTimeout, "startup-timeout", set.StartupTimeout,
 		"Optional configuration and component startup timeout; zero preserves the caller context.")
+	flagSet.DurationVar(&set.ShutdownTimeout, "shutdown-timeout", set.ShutdownTimeout,
+		"Optional termination cleanup timeout; zero preserves the existing shutdown context.")
 	rootCmd := &cobra.Command{
 		Use:          set.BuildInfo.Command,
 		Version:      set.BuildInfo.Version,

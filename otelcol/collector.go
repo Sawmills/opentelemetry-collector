@@ -75,6 +75,12 @@ type CollectorSettings struct {
 	// Operations that ignore cancellation can exceed this timeout.
 	StartupTimeout time.Duration
 
+	// ShutdownTimeout cancels termination cleanup after this duration.
+	// Zero preserves the existing shutdown context.
+	// Negative durations expire immediately.
+	// Operations that ignore cancellation can exceed this timeout.
+	ShutdownTimeout time.Duration
+
 	// ConfigProviderSettings allows configuring the way the Collector retrieves its configuration
 	// The Collector will reload based on configuration changes from the ConfigProvider if any
 	// confmap.Providers watch for configuration changes.
@@ -345,6 +351,18 @@ func (col *Collector) Run(ctx context.Context) error {
 	if !col.set.DisableGracefulShutdown {
 		signal.Notify(col.signalsChannel, os.Interrupt, SIGTERM)
 	}
+	shutdown := func(shutdownCtx context.Context) error {
+		if col.set.ShutdownTimeout != 0 {
+			var cancelShutdown context.CancelFunc
+			shutdownCtx, cancelShutdown = context.WithTimeout(shutdownCtx, col.set.ShutdownTimeout)
+			defer cancelShutdown()
+		}
+		err := col.shutdown(shutdownCtx)
+		if err == nil && col.set.ShutdownTimeout != 0 {
+			err = shutdownCtx.Err()
+		}
+		return err
+	}
 	startupCtx := ctx
 	finishStartup := func() {}
 	if col.set.StartupTimeout != 0 {
@@ -381,7 +399,13 @@ func (col *Collector) Run(ctx context.Context) error {
 	if cause := context.Cause(startupCtx); col.set.StartupTimeout != 0 && cause != nil {
 		if err == nil {
 			// Startup cancellation must not prevent cleanup of started components.
-			err = col.shutdown(context.WithoutCancel(ctx))
+			rollbackCtx := context.WithoutCancel(ctx)
+			if deadline, ok := ctx.Deadline(); col.set.ShutdownTimeout != 0 && ok && time.Now().Before(deadline) {
+				var cancelRollback context.CancelFunc
+				rollbackCtx, cancelRollback = context.WithDeadline(rollbackCtx, deadline)
+				defer cancelRollback()
+			}
+			err = shutdown(rollbackCtx)
 		}
 		if !errors.Is(err, cause) {
 			err = multierr.Combine(err, cause)
@@ -438,10 +462,10 @@ LOOP:
 		case <-ctx.Done():
 			col.service.Logger().Info("Context done, terminating process", zap.Error(ctx.Err()))
 			// Call shutdown with background context as the passed in context has been canceled
-			return col.shutdown(context.Background()) //nolint:contextcheck
+			return shutdown(context.Background()) //nolint:contextcheck
 		}
 	}
-	return col.shutdown(ctx)
+	return shutdown(ctx)
 }
 
 func (col *Collector) shutdown(ctx context.Context) error {

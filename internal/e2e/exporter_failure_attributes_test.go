@@ -146,16 +146,23 @@ func startFailureAttributeCollector(t *testing.T, exporterEndpoint string) (stri
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	go func() {
-		if err := collector.Run(ctx); err != nil {
-			t.Logf("Collector stopped with error: %v", err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- collector.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("collector failed to stop")
 		}
-	}()
+	})
 
 	require.Eventually(t, func() bool {
+		if collector.GetState() != otelcol.StateRunning {
+			return false
+		}
 		resp, err := http.Get(fmt.Sprintf("http://localhost:%s/metrics", metricsPort))
 		if err != nil {
 			return false
