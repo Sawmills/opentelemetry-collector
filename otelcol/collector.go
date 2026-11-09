@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -66,6 +67,12 @@ type CollectorSettings struct {
 	// Users who want to handle signals themselves can disable this behavior
 	// and manually handle the signals to shutdown the collector.
 	DisableGracefulShutdown bool
+
+	// ShutdownTimeout cancels termination cleanup after this duration.
+	// Zero preserves the existing shutdown context.
+	// Negative durations expire immediately.
+	// Operations that ignore cancellation can exceed this timeout.
+	ShutdownTimeout time.Duration
 
 	// ConfigProviderSettings allows configuring the way the Collector retrieves its configuration
 	// The Collector will reload based on configuration changes from the ConfigProvider if any
@@ -358,6 +365,18 @@ func (col *Collector) Run(ctx context.Context) error {
 		return err
 	}
 
+	shutdown := func(shutdownCtx context.Context) error {
+		if col.set.ShutdownTimeout != 0 {
+			var cancelShutdown context.CancelFunc
+			shutdownCtx, cancelShutdown = context.WithTimeout(shutdownCtx, col.set.ShutdownTimeout)
+			defer cancelShutdown()
+		}
+		err := col.shutdown(shutdownCtx)
+		if err == nil && col.set.ShutdownTimeout != 0 {
+			err = shutdownCtx.Err()
+		}
+		return err
+	}
 	// Control loop: selects between channels for various interrupts - when this loop is broken, the collector exits.
 	// If a configuration reload fails, we return without waiting for graceful shutdown.
 LOOP:
@@ -388,10 +407,10 @@ LOOP:
 		case <-ctx.Done():
 			col.service.Logger().Info("Context done, terminating process", zap.Error(ctx.Err()))
 			// Call shutdown with background context as the passed in context has been canceled
-			return col.shutdown(context.Background()) //nolint:contextcheck
+			return shutdown(context.Background()) //nolint:contextcheck
 		}
 	}
-	return col.shutdown(ctx)
+	return shutdown(ctx)
 }
 
 func (col *Collector) shutdown(ctx context.Context) error {

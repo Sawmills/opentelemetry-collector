@@ -24,6 +24,8 @@ import (
 // At least one Provider must be set.
 func NewCommand(set CollectorSettings) *cobra.Command {
 	flagSet := flags(featuregate.GlobalRegistry())
+	flagSet.DurationVar(&set.ShutdownTimeout, "shutdown-timeout", set.ShutdownTimeout,
+		"Optional termination cleanup timeout; zero preserves the existing shutdown context.")
 	rootCmd := &cobra.Command{
 		Use:          set.BuildInfo.Command,
 		Version:      set.BuildInfo.Version,

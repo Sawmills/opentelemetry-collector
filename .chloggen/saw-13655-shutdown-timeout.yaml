@@ -1,0 +1,10 @@
+change_type: enhancement
+component: pkg/otelcol
+note: Add an optional termination timeout through CollectorSettings.ShutdownTimeout and the NewCommand --shutdown-timeout flag.
+issues: [20]
+subtext: |
+  One timeout covers configuration-provider and service termination cleanup.
+  Zero keeps the existing shutdown context and signal behavior.
+  Negative durations expire immediately. Windows services use CollectorSettings.
+  Operations that ignore cancellation can exceed the timeout.
+change_logs: [user, api]
