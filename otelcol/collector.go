@@ -399,7 +399,13 @@ func (col *Collector) Run(ctx context.Context) error {
 	if cause := context.Cause(startupCtx); col.set.StartupTimeout != 0 && cause != nil {
 		if err == nil {
 			// Startup cancellation must not prevent cleanup of started components.
-			err = shutdown(context.WithoutCancel(ctx))
+			rollbackCtx := context.WithoutCancel(ctx)
+			if deadline, ok := ctx.Deadline(); col.set.ShutdownTimeout != 0 && ok && time.Now().Before(deadline) {
+				var cancelRollback context.CancelFunc
+				rollbackCtx, cancelRollback = context.WithDeadline(rollbackCtx, deadline)
+				defer cancelRollback()
+			}
+			err = shutdown(rollbackCtx)
 		}
 		if !errors.Is(err, cause) {
 			err = multierr.Combine(err, cause)

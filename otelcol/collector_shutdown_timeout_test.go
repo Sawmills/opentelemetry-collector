@@ -63,6 +63,35 @@ func TestCollectorShutdownTimeoutBoundsLateStartupRollback(t *testing.T) {
 	require.Equal(t, StateClosed, col.GetState())
 }
 
+func TestCollectorShutdownTimeoutRollbackRetainsLiveCallerDeadline(t *testing.T) {
+	for _, timeout := range []time.Duration{0, 10 * time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			var cleanupDeadline time.Time
+			set := shutdownTimeoutSettings(t, func(ctx context.Context, _ component.Host) error {
+				<-ctx.Done()
+				return nil
+			}, func(ctx context.Context) error {
+				cleanupDeadline, _ = ctx.Deadline()
+				return nil
+			})
+			set.StartupTimeout = 50 * time.Millisecond
+			set.ShutdownTimeout = timeout
+			col, err := NewCollector(set)
+			require.NoError(t, err)
+			parent, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			require.ErrorIs(t, col.Run(parent), context.DeadlineExceeded)
+			require.NoError(t, parent.Err())
+			if timeout == 0 {
+				require.True(t, cleanupDeadline.IsZero(), "disabled timeout must preserve detached rollback cleanup")
+			} else {
+				wantDeadline, _ := parent.Deadline()
+				require.Equal(t, wantDeadline, cleanupDeadline, "rollback must retain the still-live caller deadline")
+			}
+		})
+	}
+}
+
 func TestCollectorShutdownTimeoutCancelsCleanupAndReleasesResources(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
