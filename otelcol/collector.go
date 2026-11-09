@@ -68,6 +68,13 @@ type CollectorSettings struct {
 	// and manually handle the signals to shutdown the collector.
 	DisableGracefulShutdown bool
 
+	// StartupTimeout cancels initial configuration retrieval and component startup
+	// if they have not finished within this duration. Component contexts retain
+	// their lifetime after successful startup. Zero preserves the context supplied
+	// to Run. Negative durations expire immediately.
+	// Operations that ignore cancellation can exceed this timeout.
+	StartupTimeout time.Duration
+
 	// ShutdownTimeout cancels termination cleanup after this duration.
 	// Zero preserves the existing shutdown context.
 	// Negative durations expire immediately.
@@ -344,8 +351,50 @@ func (col *Collector) Run(ctx context.Context) error {
 	if !col.set.DisableGracefulShutdown {
 		signal.Notify(col.signalsChannel, os.Interrupt, SIGTERM)
 	}
+	startupCtx := ctx
+	finishStartup := func() {}
+	if col.set.StartupTimeout != 0 {
+		var cancelStartup context.CancelCauseFunc
+		startupCtx, cancelStartup = context.WithCancelCause(ctx)
+		defer cancelStartup(nil)
+		var startupMu sync.Mutex
+		startupActive := true
+		deadline := time.Now().Add(col.set.StartupTimeout)
+		if !time.Now().Before(deadline) {
+			cancelStartup(context.DeadlineExceeded)
+		}
+		timer := time.AfterFunc(col.set.StartupTimeout, func() {
+			startupMu.Lock()
+			defer startupMu.Unlock()
+			if startupActive {
+				cancelStartup(context.DeadlineExceeded)
+			}
+		})
+		defer timer.Stop()
+		finishStartup = func() {
+			startupMu.Lock()
+			defer startupMu.Unlock()
+			startupActive = false
+			timer.Stop()
+			if !time.Now().Before(deadline) {
+				cancelStartup(context.DeadlineExceeded)
+			}
+		}
+	}
 	// setupConfigurationComponents is the "main" function responsible for startup
-	if err := col.setupConfigurationComponents(ctx); err != nil {
+	err := col.setupConfigurationComponents(startupCtx)
+	finishStartup()
+	if cause := context.Cause(startupCtx); col.set.StartupTimeout != 0 && cause != nil {
+		if err == nil {
+			// Startup cancellation must not prevent cleanup of started components.
+			err = col.shutdown(context.WithoutCancel(ctx))
+		}
+		if !errors.Is(err, cause) {
+			err = multierr.Combine(err, cause)
+		}
+		err = fmt.Errorf("collector startup failed with timeout %s: %w", col.set.StartupTimeout, err)
+	}
+	if err != nil {
 		col.setCollectorState(StateClosed)
 		logger, loggerErr := newFallbackLogger(col.set.LoggingOptions)
 		if loggerErr != nil {

@@ -1,0 +1,12 @@
+change_type: enhancement
+component: pkg/otelcol
+note: Add an optional startup timeout through CollectorSettings.StartupTimeout and the NewCommand --startup-timeout flag.
+issues: [20]
+subtext: |
+  The timeout cancels initial configuration retrieval and component startup.
+  Zero keeps the caller context and existing signal behavior.
+  The running collector keeps its original lifetime context.
+  Component contexts retain their lifetime after startup completes.
+  Negative durations expire immediately. Windows services use CollectorSettings.
+  Operations that ignore cancellation can exceed the timeout.
+change_logs: [user, api]
