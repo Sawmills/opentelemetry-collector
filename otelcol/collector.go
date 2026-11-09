@@ -351,6 +351,18 @@ func (col *Collector) Run(ctx context.Context) error {
 	if !col.set.DisableGracefulShutdown {
 		signal.Notify(col.signalsChannel, os.Interrupt, SIGTERM)
 	}
+	shutdown := func(shutdownCtx context.Context) error {
+		if col.set.ShutdownTimeout != 0 {
+			var cancelShutdown context.CancelFunc
+			shutdownCtx, cancelShutdown = context.WithTimeout(shutdownCtx, col.set.ShutdownTimeout)
+			defer cancelShutdown()
+		}
+		err := col.shutdown(shutdownCtx)
+		if err == nil && col.set.ShutdownTimeout != 0 {
+			err = shutdownCtx.Err()
+		}
+		return err
+	}
 	startupCtx := ctx
 	finishStartup := func() {}
 	if col.set.StartupTimeout != 0 {
@@ -387,7 +399,7 @@ func (col *Collector) Run(ctx context.Context) error {
 	if cause := context.Cause(startupCtx); col.set.StartupTimeout != 0 && cause != nil {
 		if err == nil {
 			// Startup cancellation must not prevent cleanup of started components.
-			err = col.shutdown(context.WithoutCancel(ctx))
+			err = shutdown(context.WithoutCancel(ctx))
 		}
 		if !errors.Is(err, cause) {
 			err = multierr.Combine(err, cause)
@@ -414,18 +426,6 @@ func (col *Collector) Run(ctx context.Context) error {
 		return err
 	}
 
-	shutdown := func(shutdownCtx context.Context) error {
-		if col.set.ShutdownTimeout != 0 {
-			var cancelShutdown context.CancelFunc
-			shutdownCtx, cancelShutdown = context.WithTimeout(shutdownCtx, col.set.ShutdownTimeout)
-			defer cancelShutdown()
-		}
-		err := col.shutdown(shutdownCtx)
-		if err == nil && col.set.ShutdownTimeout != 0 {
-			err = shutdownCtx.Err()
-		}
-		return err
-	}
 	// Control loop: selects between channels for various interrupts - when this loop is broken, the collector exits.
 	// If a configuration reload fails, we return without waiting for graceful shutdown.
 LOOP:

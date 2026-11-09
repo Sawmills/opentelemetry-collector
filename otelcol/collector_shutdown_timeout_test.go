@@ -19,6 +19,50 @@ import (
 	"go.opentelemetry.io/collector/extension"
 )
 
+func TestCollectorShutdownTimeoutBoundsLateStartupRollback(t *testing.T) {
+	release := make(chan struct{})
+	releaseCleanup := sync.OnceFunc(func() { close(release) })
+	defer releaseCleanup()
+	cleanupContext := make(chan context.Context, 1)
+	set := shutdownTimeoutSettings(t, func(ctx context.Context, _ component.Host) error {
+		<-ctx.Done()
+		return nil
+	}, func(ctx context.Context) error {
+		cleanupContext <- ctx
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	})
+	set.StartupTimeout = 50 * time.Millisecond
+	set.ShutdownTimeout = 50 * time.Millisecond
+	col, err := NewCollector(set)
+	require.NoError(t, err)
+	parent, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- col.Run(parent) }()
+	var seen context.Context
+	select {
+	case seen = <-cleanupContext:
+	case <-time.After(time.Second):
+		releaseCleanup()
+		_ = waitShutdownTimeoutCollector(t, done)
+		t.Fatal("late startup rollback did not enter cleanup")
+	}
+	_, hasDeadline := seen.Deadline()
+	if !hasDeadline {
+		releaseCleanup()
+	}
+	require.ErrorIs(t, waitShutdownTimeoutCollector(t, done), context.DeadlineExceeded)
+	require.True(t, hasDeadline, "late startup rollback cleanup must receive the configured shutdown deadline")
+	require.ErrorIs(t, seen.Err(), context.DeadlineExceeded)
+	require.NoError(t, parent.Err(), "rollback must finish before the running caller expires")
+	require.Equal(t, StateClosed, col.GetState())
+}
+
 func TestCollectorShutdownTimeoutCancelsCleanupAndReleasesResources(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
