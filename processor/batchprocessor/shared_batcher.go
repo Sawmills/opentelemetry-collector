@@ -86,7 +86,7 @@ func (mb *sharedMetadataBatcher[T]) consume(ctx context.Context, data T) error {
 			}
 			group = &sharedMetadataGroup[T]{
 				input: make(chan T, mb.processor.inputBufferSize),
-				exportCtx: client.NewContext(context.Background(), client.Info{
+				exportCtx: client.NewContext(mb.processor.exportCtx, client.Info{
 					Metadata: client.NewMetadata(md),
 				}),
 			}

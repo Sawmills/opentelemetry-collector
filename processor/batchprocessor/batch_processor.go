@@ -50,8 +50,10 @@ type batchProcessor[T any] struct {
 	// with the appropriate signal.
 	batchFunc func() batch[T]
 
-	shutdownC  chan struct{}
-	goroutines sync.WaitGroup
+	shutdownC     chan struct{}
+	goroutines    sync.WaitGroup
+	exportCtx     context.Context
+	cancelExports context.CancelFunc
 
 	telemetry *batchProcessorTelemetry
 
@@ -129,6 +131,7 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		mks[i] = strings.ToLower(k)
 	}
 	sort.Strings(mks)
+	exportCtx, cancelExports := context.WithCancel(context.Background())
 	bp := &batchProcessor[T]{
 		logger: set.Logger,
 
@@ -138,6 +141,8 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		timeout:          cfg.Timeout,
 		batchFunc:        batchFunc,
 		shutdownC:        make(chan struct{}, 1),
+		exportCtx:        exportCtx,
+		cancelExports:    cancelExports,
 	}
 	numShards := min(max(int(cfg.NumShards), 1), runtime.GOMAXPROCS(0))
 	switch {
@@ -174,6 +179,7 @@ func newBatchProcessor[T any](set processor.Settings, cfg *Config, batchFunc fun
 		bp.batcher.currentQueueCapacity,
 	)
 	if err != nil {
+		cancelExports()
 		return nil, fmt.Errorf("error creating batch processor telemetry: %w", err)
 	}
 	bp.telemetry = bpt
@@ -194,7 +200,7 @@ func shardInputBufferSize(total, numShards, shardIndex int) int {
 
 // newShard gets or creates a batcher corresponding with attrs.
 func (bp *batchProcessor[T]) newShard(md map[string][]string, inputBufferSize int) *shard[T] {
-	exportCtx := client.NewContext(context.Background(), client.Info{
+	exportCtx := client.NewContext(bp.exportCtx, client.Info{
 		Metadata: client.NewMetadata(md),
 	})
 	b := &shard[T]{
@@ -228,7 +234,13 @@ func (bp *batchProcessor[T]) Start(ctx context.Context, _ component.Host) error 
 }
 
 // Shutdown is invoked during service shutdown.
-func (bp *batchProcessor[T]) Shutdown(context.Context) error {
+func (bp *batchProcessor[T]) Shutdown(ctx context.Context) error {
+	stop := context.AfterFunc(ctx, bp.cancelExports)
+	defer stop()
+	defer bp.cancelExports()
+	if ctx.Err() != nil {
+		bp.cancelExports()
+	}
 	if shared, ok := bp.batcher.(*sharedMetadataBatcher[T]); ok {
 		shared.close()
 	}
@@ -237,7 +249,7 @@ func (bp *batchProcessor[T]) Shutdown(context.Context) error {
 	// Wait until all goroutines are done.
 	bp.goroutines.Wait()
 
-	return nil
+	return ctx.Err()
 }
 
 func (b *shard[T]) start() {
