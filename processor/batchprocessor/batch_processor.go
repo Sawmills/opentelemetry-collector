@@ -296,8 +296,6 @@ func (b *shard[T]) startLoop() {
 			}
 			// This is the close of the channel
 			if b.batch.itemCount() > 0 {
-				// TODO: Set a timeout on sendTraces or
-				// make it cancellable using the context that Shutdown gets as a parameter
 				b.sendItems(triggerTimeout)
 			}
 			return

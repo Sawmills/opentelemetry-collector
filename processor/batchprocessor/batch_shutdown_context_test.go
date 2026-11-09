@@ -287,17 +287,26 @@ func testShutdownContextCancelsMetricsHTTPRequest(t *testing.T, cfg *batchproces
 	if !flushOnShutdown {
 		waitRequest()
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var wantError error = context.DeadlineExceeded
+	if flushOnShutdown {
+		ctx, cancel = context.WithCancel(t.Context())
+		wantError = context.Canceled
+	} else {
+		ctx, cancel = context.WithTimeout(t.Context(), 50*time.Millisecond)
+	}
 	defer cancel()
 	done := make(chan error, 1)
 	shutdownStarted = true
 	go func() { done <- metrics.Shutdown(ctx) }()
 	if flushOnShutdown {
 		waitRequest()
+		cancel()
 	}
 	select {
 	case shutdownErr := <-done:
-		require.ErrorIs(t, shutdownErr, context.DeadlineExceeded)
+		require.ErrorIs(t, shutdownErr, wantError)
 	case <-time.After(time.Second):
 		releaseResponse()
 		select {

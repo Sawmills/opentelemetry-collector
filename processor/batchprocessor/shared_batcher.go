@@ -215,8 +215,8 @@ func (mb *sharedMetadataBatcher[T]) run(worker *shard[T]) {
 	}
 }
 
-// bindExportContext switches an empty worker to a detached group context and
-// starts that group's flush interval. It never derives from the previous context.
+// bindExportContext binds group metadata and processor shutdown cancellation to
+// an empty worker, then starts that group's flush interval.
 func (b *shard[T]) bindExportContext(ctx context.Context) {
 	b.exportCtx = ctx
 	b.stopTimer()
