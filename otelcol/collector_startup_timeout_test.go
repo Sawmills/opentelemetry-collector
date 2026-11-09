@@ -126,10 +126,15 @@ func TestCollectorStartupTimeoutRejectsLateSuccess(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer listener.Close()
+	var cleanupEntryError error
 	set := startupTimeoutSettings(t, func(ctx context.Context, _ component.Host) error {
 		<-ctx.Done()
 		return nil
-	}, func(context.Context) error {
+	}, func(ctx context.Context) error {
+		cleanupEntryError = ctx.Err()
+		if cleanupEntryError != nil {
+			return cleanupEntryError
+		}
 		return listener.Close()
 	})
 	set.StartupTimeout = 50 * time.Millisecond
@@ -141,6 +146,7 @@ func TestCollectorStartupTimeoutRejectsLateSuccess(t *testing.T) {
 		"a successful Start cannot erase the configured startup deadline")
 	require.NoError(t, parent.Err())
 	require.Equal(t, StateClosed, col.GetState())
+	require.NoError(t, cleanupEntryError, "startup cancellation must leave cleanup able to release resources")
 	peer, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
 	if peer != nil {
 		_ = peer.Close()

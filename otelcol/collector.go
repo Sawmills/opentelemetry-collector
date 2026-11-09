@@ -380,7 +380,8 @@ func (col *Collector) Run(ctx context.Context) error {
 	finishStartup()
 	if cause := context.Cause(startupCtx); col.set.StartupTimeout != 0 && cause != nil {
 		if err == nil {
-			err = col.shutdown(startupCtx)
+			// Startup cancellation must not prevent cleanup of started components.
+			err = col.shutdown(context.WithoutCancel(ctx))
 		}
 		if !errors.Is(err, cause) {
 			err = multierr.Combine(err, cause)
