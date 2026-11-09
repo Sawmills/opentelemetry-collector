@@ -1,7 +1,7 @@
 change_type: bug_fix
 component: processor/batch
 note: Honor shutdown context cancellation during in-flight and final batch exports.
-issues: []
+issues: [23]
 subtext: |
   Shutdown waits for every worker and returns the caller's context error.
   An uncanceled shutdown context preserves normal draining.

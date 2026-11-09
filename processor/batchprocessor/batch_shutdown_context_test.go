@@ -289,7 +289,7 @@ func testShutdownContextCancelsMetricsHTTPRequest(t *testing.T, cfg *batchproces
 	}
 	var ctx context.Context
 	var cancel context.CancelFunc
-	var wantError error = context.DeadlineExceeded
+	wantError := context.DeadlineExceeded
 	if flushOnShutdown {
 		ctx, cancel = context.WithCancel(t.Context())
 		wantError = context.Canceled
